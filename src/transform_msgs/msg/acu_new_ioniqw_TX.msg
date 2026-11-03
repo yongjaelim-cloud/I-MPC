@@ -1,0 +1,10 @@
+Header header
+bool Left_Turn_Signal
+bool Right_Turn_Signal
+bool MDPS_Enable
+bool EMR_STOP_Enable
+bool ACC_Enable
+bool MDPS_OVR_Prevention
+float64 SWA_cmd
+float64 Ax_cmd
+float64 EMR_Ax_cmd

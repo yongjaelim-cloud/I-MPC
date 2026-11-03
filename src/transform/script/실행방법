@@ -1,0 +1,47 @@
+// former
+
+source ~/ros_vel/devel/setup.bash
+sudo ip addr add 192.168.1.100/24 dev enx00e0813502a0
+sudo ip link set enx00e0813502a0 up
+curl --data "rpm=1200" http://192.168.1.201/cgi/setting
+roslaunch velodyne_pointcloud VLP-32C_points.launch
+device_ip:=192.168.1.201
+port:=2368
+frame_id:=velodyne
+rpm:=1200
+
+
+// former
+rosrun tf2_ros static_transform_publisher \
+    0 0 0.8 0 0 0 1 base_link velodyne
+    
+    
+    
+// former
+source ~/ros_vel/devel/setup.bash
+
+rosparam set /use_sim_time false
+
+roslaunch hdl_localization hdl_localization.launch \
+  points_topic:=/velodyne_points \
+  use_imu:=false \
+  use_global_localization:=true \
+  nodelet_manager:=hdl_localization_manager
+
+
+alias cartographer='roslaunch ~/cartographer_ws/src/cartographer_ros>
+alias goal_pub="python3 /home/former/seungwoo_ws/tmp/goal_pose_publi>
+
+=====================================================================
+/usr/bin/python3 setter.py
+python3 vertex_selector_exp.py _cloud_z_min:=-0.1 _cloud_z_max:=0.5
+python3 velodyne_
+python3 plotter_exp2.py
+
+
+
+
+=====================================================================
+export ACADOS_SOURCE_DIR="home/tblee-larr/acados"
+export PYTHONPATH=$ACADOS_SOURCE_DIR/interfaces/acados_template:$PYTHONPATH
+export LD_LIBRARY_PATH=$ACADOS_SOURCE_DIR/lib:$LD_LIBRARY_PATH

@@ -1,0 +1,935 @@
+{
+  "description": "Flag-organized single-source configuration. Set mpc_flag.selected and field_flag.selected. Mode-specific variables are grouped under the corresponding flag; variables shared across modes are under common. setter.py/setter_gazebo.py resolves the selected profiles and publishes the legacy typed /setup structure, so downstream nodes do not read JSON directly.",
+  "mpc_flag": {
+    "selected": 4,
+    "0": {
+      "name": "Uniform-slack MPC",
+      "description": "Four exact ego-surface distance constraints; all four are relaxable with the same slack penalty.",
+      "variables": {
+        "surface_slack_max": 1000000.0,
+        "q_surface_slack": 100000000.0
+      }
+    },
+    "1": {
+      "name": "Surface-wise MPC",
+      "description": "The vulnerable surface selected by sector_id is hard; the other three exact surface constraints are relaxable.",
+      "variables": {
+        "surface_slack_max": 1000000.0,
+        "q_nonvulnerable_slack": 100000000.0
+      }
+    },
+    "2": {
+      "name": "Weighted Vulnerability-Aware MPC",
+      "description": "All four exact surface constraints are relaxable; the vulnerable surface receives the larger slack penalty.",
+      "variables": {
+        "surface_slack_max": 1000000.0,
+        "q_nonvulnerable_slack": 100000000.0,
+        "q_vulnerable_slack": 10000000000.0
+      }
+    },
+    "3": {
+      "name": "Lexicographic MPC",
+      "description": "Vulnerable-surface violation is minimized first, fixed within tolerance, then the remaining surface violations are minimized.",
+      "variables": {
+        "surface_slack_max": 1000000.0,
+        "q_nonvulnerable_slack": 100000000.0,
+        "q_vulnerable_slack": 10000000000.0,
+        "lexicographic_fix_tolerance": 1e-07
+      }
+    },
+    "4": {
+      "name": "Proposed minimum-distance + impact-location-conditioned MPC",
+      "description": "Minimum-distance avoidance plus impact-location-conditioned relaxation. The proposed slack penalties are rho_s*(s_k^a)^2 and rho_c*(s_k^r)^2, and rho_impact weights the impact-alignment ranking term. dt_init is fixed and is not a decision variable.",
+      "variables": {
+        "enable_normal_mag_avoidance_constraint": true,
+        "enable_impact_normal_constraint": true,
+        "collision_slack_max": 1000000.0,
+        "normal_alignment_slack_max": 1000000.0,
+        "rho_s": 1000000.0,
+        "rho_c": 1000000000.0,
+        "rho_impact": 0.0,
+        "global_candidate_objective": "sum_{k=1}^H ||x_k-x_G||_Q^2 + sum_{k=0}^{H-1} ||x_k-x_prev_tilde_k||_Qsim^2 - rho_Phi_global*sum_{k=1}^H Phi_k + rho_s*sum_{k=1}^H (s_k^a)^2 + rho_c*sum_{k=1}^H (s_k^r)^2 + rho_impact*sum_{k=1}^H (-grad Phi_k(0))^T n(phi_c)"
+      }
+    }
+  },
+  "field_flag": {
+    "selected": 4,
+    "0": {
+      "name": "Circle-overestimation SDF",
+      "description": "Circle-based over-approximation field.",
+      "variables": {
+        "circle_union_lambda": 0.0
+      }
+    },
+    "1": {
+      "name": "DCSAT field",
+      "description": "DCSAT smooth collision field.",
+      "variables": {
+        "dcsat_alpha": 35.0,
+        "dcsat_union_lambda": 0.02
+      }
+    },
+    "2": {
+      "name": "Geometry-Aware Bernstein-polynomial SDF",
+      "description": "Geometry-aware Bernstein-polynomial SDF fitted from the obstacle geometry.",
+      "variables": {
+        "bp_order": 12,
+        "bp_training_n_x": 25,
+        "bp_training_n_y": 25,
+        "bp_safety_margin_l": 0.13,
+        "bp_domain_padding": 0.1
+      }
+    },
+    "3": {
+      "name": "Wu et al. (2025) smooth polygon field",
+      "description": "Wu et al. smooth polygon field.",
+      "variables": {
+        "wu_kappa": 35.0,
+        "wu_union_lambda": 0.02,
+        "wu_buffer_offset": 0.0
+      }
+    },
+    "4": {
+      "name": "Proposed proximity field",
+      "description": "Proposed edge/pseudo-vertex proximity field. N_n, epsilon_tot, epsilon_f, lambda_f, and lambda_o are derived automatically from theta, delta_o, delta_f, M_max, and F_max with epsilon_o fixed at 0.999. lambda_r is configured independently under common.mpc.",
+      "variables": {}
+    }
+  },
+  "common": {
+    "config": {
+      "sector_id": 1,
+      "sector_dir": "outward",
+      "x_min": -100000000.0,
+      "x_max": 100000000.0,
+      "y_min": -100000000.0,
+      "y_max": 100000000.0,
+      "goal_x": 5.5,
+      "goal_y": 5.5,
+      "x_end": 6.0,
+      "y_end": 6.0,
+      "FOV": 6.0,
+      "obs_fov_deg": 180.0,
+      "max_obs": 200,
+      "publish_rate": 20.0,
+      "time_interval": 0.01,
+      "obs_num_static": 0,
+      "obs_num_dyn": 70,
+      "obstacle_save_path": "drone_2D_crowded_obstacles.mat",
+      "regenerate_obstacles": false,
+      "obstacle_seed": 20,
+      "obs_min_vertex_num": 5,
+      "obs_max_vertex_num": 9,
+      "obs_min_radius": 0.5,
+      "obs_max_radius": 0.8,
+      "obs_min_dist_m": 0.7,
+      "start_goal_clearance_m": 2.0,
+      "obstacle_max_trial": 10000,
+      "V_max": 0.8,
+      "repulsion_extra_margin": 1.0,
+      "repulsion_strength": 0.7,
+      "random_force_strength": 1.0,
+      "max_velocity": 0.8,
+      "scenario_flag": 0,
+      "warehouse_static_obstacle_count": 20,
+      "warehouse_static_min_node_gap": 1,
+      "warehouse_rack_station_start_m": 3.4,
+      "warehouse_rack_station_spacing_m": 4.0,
+      "warehouse_rack_length_m": 2.5,
+      "warehouse_rack_width_m": 1.0,
+      "warehouse_rack_lateral_offset_m": 3.0,
+      "warehouse_dynamic_obstacle_count": 40,
+      "warehouse_forklift_length_m": 0.6,
+      "warehouse_forklift_width_m": 0.6,
+      "warehouse_forklift_speed_mps": 0.35,
+      "topics": {
+        "ego_goal_set": "/ego_goal_set",
+        "ego_state": "/ego_state",
+        "obstacle": "/obstacle"
+      },
+      "collision_push_static": false,
+      "warehouse_graph_spacing_m": 2.0,
+      "warehouse_forklift_yawrate_rps": 0.4
+    },
+    "ego": {
+      "goal_tolerance": 1.0,
+      "ego_x": -5.0,
+      "ego_y": -5.0,
+      "ego_v": 0.0,
+      "ego_yaw": 0.785,
+      "ego_L": 0.6,
+      "ego_W": 0.6,
+      "hz": 20.0,
+      "frame_id": "map",
+      "reset_from_goal_once": true,
+      "reset_on_every_goal": false,
+      "input_topics": {
+        "ego_goal_set": "/ego_goal_set",
+        "mpc_control_seq": "/mpc_control_seq",
+        "mpc_control_seq_topics": [
+          "/mpc_control_seq0",
+          "/mpc_control_seq1",
+          "/mpc_control_seq2",
+          "/mpc_control_seq3",
+          "/mpc_control_seq4",
+          "/mpc_control_seq5",
+          "/mpc_control_seq6"
+        ]
+      },
+      "publishers": {
+        "ego_state": "/ego_state",
+        "ego_goal_setting": "/ego_goal_setting"
+      },
+      "goal_corner_margin": 0.5,
+      "goal_switch_enabled": true,
+      "goal_switch_timeout_s": 100000000.0,
+      "publish_initial_cycle_goal": true,
+      "traj_similarity_weight": 0.0,
+      "traj_similarity_pos_weight": 1.0,
+      "traj_similarity_yaw_weight": 0.0,
+      "traj_similarity_v_weight": 0.0,
+      "control_candidates_per_seq": 7
+    },
+    "guidance": {
+      "N": 30,
+      "dt_init": 0.1,
+      "radius_interval": 2.0,
+      "radius_max": 4.0,
+      "ego_v_min": 0.1,
+      "yawrate_min": -0.4,
+      "yawrate_max": 0.4,
+      "theta_sampling_num": 12,
+      "theta_min_deg": -70.0,
+      "theta_max_deg": 70.0
+    },
+    "mpc": {
+      "acc_order": [
+        0,
+        -1,
+        1
+      ],
+      "yawrate_order": [
+        0,
+        1,
+        -1
+      ],
+      "collsion_avoidance_off_over_20": false,
+      "planner_id": 1,
+      "hz": 20.0,
+      "N": 20,
+      "dt_init": 0.1,
+      "yawrate_min": -1.3,
+      "yawrate_max": 1.3,
+      "a_min": -1.0,
+      "a_max": 1.0,
+      "v_min": -0.01,
+      "v_max": 1.0,
+      "v_slack_weight": 1000000.0,
+      "no_acc_flag": false,
+      "nonlinear_dyn_flag": true,
+      "debug_mode": false,
+      "cal_time_log_flag": false,
+      "enable_boundary_constraint": false,
+      "q_pos": 1.0,
+      "q_seq": 0.0,
+      "q_yaw": 1.0,
+      "q_v": 0.0,
+      "v_des": 0.8,
+      "r_yawrate": 2.0,
+      "r_a": 0.0,
+      "msg_max_vertices": 10,
+      "fallback_polygon_vertices": 8,
+      "perception_rate": 1.0,
+      "disabled_c_value": -1000000000.0,
+      "h_upper_bound": 1000000000000000.0,
+      "acados_model_name": "switchable_mpc_compact_delta_dynamics",
+      "acados_json_file": "acados_switchable_mpc_compact_delta_dynamics.json",
+      "acados_code_export_dir": "c_generated_code_switchable_mpc_compact_delta_dynamics",
+      "acados_qp_solver": "PARTIAL_CONDENSING_HPIPM",
+      "acados_hessian_approx": "GAUSS_NEWTON",
+      "acados_integrator_type": "DISCRETE",
+      "acados_nlp_solver_type": "SQP_RTI",
+      "acados_qp_solver_iter_max": 20,
+      "acados_sim_method_num_stages": 4,
+      "acados_sim_method_num_steps": 1,
+      "acados_nlp_solver_max_iter": 1,
+      "acados_tol": 1e-06,
+      "acados_rebuild_solver": true,
+      "ORDER": 1,
+      "SQP_iter": 1,
+      "realtime_max_sqp_iter": 1,
+      "t_scale": 1.0,
+      "marker_width": 0.05,
+      "ego_trail_max": 300,
+      "moving_obstacle_R": 0.0,
+      "selected_vertex_set_topic": "/selected_vertex_set",
+      "selected_vertex_set_timeout_s": 0.5,
+      "initial_guidance_topic": "/initial_guidance1",
+      "initial_traj_topic": "/initial_traj1",
+      "d_safe": 0.2,
+      "rho_Phi_global": 0.0,
+      "q_global_goal": 1.0,
+      "normal_orientation": "inward",
+      "use_external_collision_linearization": true,
+      "normal_eps": 1e-09,
+      "use_cupy_local_frame_batch": false,
+      "acados_fixed_hess": false,
+      "cpp_omp_threads": 4,
+      "use_native_cuda_proposed": true,
+      "native_cuda_min_hf": 1024,
+      "native_cuda_threads": 256,
+      "native_cuda_fallback_to_cpu": true,
+      "native_cuda_profile": false,
+      "native_cuda_compare_cpu": false,
+      "native_cuda_profile_every": 1,
+      "theta": 0.2,
+      "delta_o": 0.005,
+      "delta_f": 0.005,
+      "M_max": 20,
+      "F_max": 200,
+      "lambda_r": 0.001,
+      "reg_margin": -0.301,
+      "comment": "cos(theta+alpha)+reg_margin"
+    },
+    "ros": {
+      "input_topics": {
+        "ego_state": "/ego_state",
+        "ego_goal_set": "/ego_goal_setting",
+        "obstacle": "/obstacle",
+        "selected_vertex_data": "/selected_vertex_data",
+        "selected_vertex_set": "/selected_vertex_set",
+        "selected_vertex_horizon_data": "/selected_vertex_horizon_data"
+      }
+    },
+    "planners": {
+      "MPC_planner0": {
+        "planner_id": 0,
+        "ORDER": 1,
+        "use_initial_guidance": false,
+        "publish_percepted_obstacle": false,
+        "publish_selected_vertices": false,
+        "publishers": {
+          "mpc_control_seq": "/mpc_control_seq0",
+          "ego_traj": "/ego_traj0"
+        },
+        "input_topics": {
+          "selected_vertex_data": "/selected_vertex_data",
+          "selected_vertex_horizon_data": "/selected_vertex_horizon_data",
+          "selected_traj": "/selected_traj"
+        }
+      },
+      "MPC_planner1": {
+        "planner_id": 1,
+        "ORDER": 1,
+        "publish_percepted_obstacle": false,
+        "publish_selected_vertices": false,
+        "publishers": {
+          "mpc_control_seq": "/mpc_control_seq1",
+          "mpc_pred_traj": "/mpc_pred_traj1",
+          "ego_traj": "/ego_traj1",
+          "initial_guidance": "/initial_guidance1",
+          "initial_traj": "/initial_traj1"
+        },
+        "mpc_pred_color": [
+          0.0,
+          1.0,
+          0.0,
+          1.0
+        ],
+        "ego_traj_color": [
+          1.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "selected_vertex_color": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "input_topics": {
+          "selected_vertex_data": "/selected_vertex_data",
+          "initial_guidance": "/initial_guidance1",
+          "mpc_control_seq_topics": [
+            "/mpc_control_seq0",
+            "/mpc_control_seq1",
+            "/mpc_control_seq2",
+            "/mpc_control_seq3",
+            "/mpc_control_seq4",
+            "/mpc_control_seq5",
+            "/mpc_control_seq6",
+            "/mpc_control_seq7",
+            "/mpc_control_seq8",
+            "/mpc_control_seq9"
+          ],
+          "selected_vertex_horizon_data": "/selected_vertex_horizon_data"
+        },
+        "initial_guidance_topic": "/initial_guidance1"
+      },
+      "MPC_planner2": {
+        "planner_id": 2,
+        "ORDER": 2,
+        "publish_percepted_obstacle": false,
+        "publish_selected_vertices": false,
+        "publishers": {
+          "mpc_control_seq": "/mpc_control_seq2",
+          "mpc_pred_traj": "/mpc_pred_traj2",
+          "ego_traj": "/ego_traj2",
+          "initial_guidance": "/initial_guidance2",
+          "initial_traj": "/initial_traj2"
+        },
+        "mpc_pred_color": [
+          1.0,
+          0.5,
+          0.0,
+          1.0
+        ],
+        "ego_traj_color": [
+          1.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "selected_vertex_color": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "input_topics": {
+          "selected_vertex_data": "/selected_vertex_data",
+          "initial_guidance": "/initial_guidance2",
+          "mpc_control_seq_topics": [
+            "/mpc_control_seq0",
+            "/mpc_control_seq1",
+            "/mpc_control_seq2",
+            "/mpc_control_seq3",
+            "/mpc_control_seq4",
+            "/mpc_control_seq5",
+            "/mpc_control_seq6",
+            "/mpc_control_seq7",
+            "/mpc_control_seq8",
+            "/mpc_control_seq9"
+          ],
+          "selected_vertex_horizon_data": "/selected_vertex_horizon_data"
+        },
+        "initial_guidance_topic": "/initial_guidance2"
+      },
+      "MPC_planner3": {
+        "planner_id": 3,
+        "ORDER": 3,
+        "publish_percepted_obstacle": false,
+        "publish_selected_vertices": false,
+        "publishers": {
+          "mpc_control_seq": "/mpc_control_seq3",
+          "mpc_pred_traj": "/mpc_pred_traj3",
+          "ego_traj": "/ego_traj3",
+          "initial_guidance": "/initial_guidance3",
+          "initial_traj": "/initial_traj3"
+        },
+        "mpc_pred_color": [
+          0.0,
+          0.7,
+          1.0,
+          1.0
+        ],
+        "ego_traj_color": [
+          1.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "selected_vertex_color": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "input_topics": {
+          "selected_vertex_data": "/selected_vertex_data",
+          "initial_guidance": "/initial_guidance3",
+          "mpc_control_seq_topics": [
+            "/mpc_control_seq0",
+            "/mpc_control_seq1",
+            "/mpc_control_seq2",
+            "/mpc_control_seq3",
+            "/mpc_control_seq4",
+            "/mpc_control_seq5",
+            "/mpc_control_seq6",
+            "/mpc_control_seq7",
+            "/mpc_control_seq8",
+            "/mpc_control_seq9"
+          ],
+          "selected_vertex_horizon_data": "/selected_vertex_horizon_data"
+        },
+        "initial_guidance_topic": "/initial_guidance3"
+      },
+      "MPC_planner4": {
+        "planner_id": 4,
+        "ORDER": 4,
+        "publish_percepted_obstacle": false,
+        "publish_selected_vertices": false,
+        "publishers": {
+          "mpc_control_seq": "/mpc_control_seq4",
+          "mpc_pred_traj": "/mpc_pred_traj4",
+          "ego_traj": "/ego_traj4",
+          "initial_guidance": "/initial_guidance4",
+          "initial_traj": "/initial_traj4"
+        },
+        "mpc_pred_color": [
+          1.0,
+          0.0,
+          1.0,
+          1.0
+        ],
+        "ego_traj_color": [
+          1.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "selected_vertex_color": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "input_topics": {
+          "selected_vertex_data": "/selected_vertex_data",
+          "initial_guidance": "/initial_guidance4",
+          "mpc_control_seq_topics": [
+            "/mpc_control_seq0",
+            "/mpc_control_seq1",
+            "/mpc_control_seq2",
+            "/mpc_control_seq3",
+            "/mpc_control_seq4",
+            "/mpc_control_seq5",
+            "/mpc_control_seq6",
+            "/mpc_control_seq7",
+            "/mpc_control_seq8",
+            "/mpc_control_seq9"
+          ],
+          "selected_vertex_horizon_data": "/selected_vertex_horizon_data"
+        },
+        "initial_guidance_topic": "/initial_guidance4"
+      },
+      "MPC_planner5": {
+        "planner_id": 5,
+        "ORDER": 5,
+        "publish_percepted_obstacle": false,
+        "publish_selected_vertices": false,
+        "publishers": {
+          "mpc_control_seq": "/mpc_control_seq5",
+          "mpc_pred_traj": "/mpc_pred_traj5",
+          "ego_traj": "/ego_traj5",
+          "initial_guidance": "/initial_guidance5",
+          "initial_traj": "/initial_traj5"
+        },
+        "mpc_pred_color": [
+          0.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "ego_traj_color": [
+          1.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "selected_vertex_color": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "input_topics": {
+          "selected_vertex_data": "/selected_vertex_data",
+          "initial_guidance": "/initial_guidance5",
+          "mpc_control_seq_topics": [
+            "/mpc_control_seq0",
+            "/mpc_control_seq1",
+            "/mpc_control_seq2",
+            "/mpc_control_seq3",
+            "/mpc_control_seq4",
+            "/mpc_control_seq5",
+            "/mpc_control_seq6",
+            "/mpc_control_seq7",
+            "/mpc_control_seq8",
+            "/mpc_control_seq9"
+          ],
+          "selected_vertex_horizon_data": "/selected_vertex_horizon_data"
+        },
+        "initial_guidance_topic": "/initial_guidance5"
+      },
+      "MPC_planner6": {
+        "planner_id": 6,
+        "ORDER": 6,
+        "publish_percepted_obstacle": false,
+        "publish_selected_vertices": false,
+        "publishers": {
+          "mpc_control_seq": "/mpc_control_seq6",
+          "mpc_pred_traj": "/mpc_pred_traj6",
+          "ego_traj": "/ego_traj6",
+          "initial_guidance": "/initial_guidance6",
+          "initial_traj": "/initial_traj6"
+        },
+        "mpc_pred_color": [
+          1.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "ego_traj_color": [
+          1.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "selected_vertex_color": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "input_topics": {
+          "selected_vertex_data": "/selected_vertex_data",
+          "initial_guidance": "/initial_guidance6",
+          "mpc_control_seq_topics": [
+            "/mpc_control_seq0",
+            "/mpc_control_seq1",
+            "/mpc_control_seq2",
+            "/mpc_control_seq3",
+            "/mpc_control_seq4",
+            "/mpc_control_seq5",
+            "/mpc_control_seq6",
+            "/mpc_control_seq7",
+            "/mpc_control_seq8",
+            "/mpc_control_seq9"
+          ],
+          "selected_vertex_horizon_data": "/selected_vertex_horizon_data"
+        },
+        "initial_guidance_topic": "/initial_guidance6"
+      },
+      "MPC_planner7": {
+        "planner_id": 7,
+        "ORDER": 7,
+        "publish_percepted_obstacle": false,
+        "publish_selected_vertices": false,
+        "publishers": {
+          "mpc_control_seq": "/mpc_control_seq7",
+          "mpc_pred_traj": "/mpc_pred_traj7",
+          "ego_traj": "/ego_traj7",
+          "initial_guidance": "/initial_guidance7",
+          "initial_traj": "/initial_traj7"
+        },
+        "mpc_pred_color": [
+          0.4,
+          0.4,
+          1.0,
+          1.0
+        ],
+        "ego_traj_color": [
+          1.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "selected_vertex_color": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "input_topics": {
+          "selected_vertex_data": "/selected_vertex_data",
+          "initial_guidance": "/initial_guidance7",
+          "mpc_control_seq_topics": [
+            "/mpc_control_seq0",
+            "/mpc_control_seq1",
+            "/mpc_control_seq2",
+            "/mpc_control_seq3",
+            "/mpc_control_seq4",
+            "/mpc_control_seq5",
+            "/mpc_control_seq6",
+            "/mpc_control_seq7",
+            "/mpc_control_seq8",
+            "/mpc_control_seq9"
+          ],
+          "selected_vertex_horizon_data": "/selected_vertex_horizon_data"
+        },
+        "initial_guidance_topic": "/initial_guidance7"
+      },
+      "MPC_planner8": {
+        "planner_id": 8,
+        "ORDER": 8,
+        "publish_percepted_obstacle": false,
+        "publish_selected_vertices": false,
+        "publishers": {
+          "mpc_control_seq": "/mpc_control_seq8",
+          "mpc_pred_traj": "/mpc_pred_traj8",
+          "ego_traj": "/ego_traj8",
+          "initial_guidance": "/initial_guidance8",
+          "initial_traj": "/initial_traj8"
+        },
+        "mpc_pred_color": [
+          1.0,
+          0.4,
+          0.7,
+          1.0
+        ],
+        "ego_traj_color": [
+          1.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "selected_vertex_color": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "input_topics": {
+          "selected_vertex_data": "/selected_vertex_data",
+          "initial_guidance": "/initial_guidance8",
+          "mpc_control_seq_topics": [
+            "/mpc_control_seq0",
+            "/mpc_control_seq1",
+            "/mpc_control_seq2",
+            "/mpc_control_seq3",
+            "/mpc_control_seq4",
+            "/mpc_control_seq5",
+            "/mpc_control_seq6",
+            "/mpc_control_seq7",
+            "/mpc_control_seq8",
+            "/mpc_control_seq9"
+          ],
+          "selected_vertex_horizon_data": "/selected_vertex_horizon_data"
+        },
+        "initial_guidance_topic": "/initial_guidance8"
+      },
+      "MPC_planner9": {
+        "planner_id": 9,
+        "ORDER": 9,
+        "publish_percepted_obstacle": false,
+        "publish_selected_vertices": false,
+        "publishers": {
+          "mpc_control_seq": "/mpc_control_seq9",
+          "mpc_pred_traj": "/mpc_pred_traj9",
+          "ego_traj": "/ego_traj9",
+          "initial_guidance": "/initial_guidance9",
+          "initial_traj": "/initial_traj9"
+        },
+        "mpc_pred_color": [
+          0.2,
+          0.2,
+          0.2,
+          1.0
+        ],
+        "ego_traj_color": [
+          1.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "selected_vertex_color": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "input_topics": {
+          "selected_vertex_data": "/selected_vertex_data",
+          "initial_guidance": "/initial_guidance9",
+          "mpc_control_seq_topics": [
+            "/mpc_control_seq0",
+            "/mpc_control_seq1",
+            "/mpc_control_seq2",
+            "/mpc_control_seq3",
+            "/mpc_control_seq4",
+            "/mpc_control_seq5",
+            "/mpc_control_seq6",
+            "/mpc_control_seq7",
+            "/mpc_control_seq8",
+            "/mpc_control_seq9"
+          ],
+          "selected_vertex_horizon_data": "/selected_vertex_horizon_data"
+        },
+        "initial_guidance_topic": "/initial_guidance9"
+      }
+    },
+    "plotter": {
+      "pred_horizon": 20,
+      "pred_vis_step": 10,
+      "safe_margin_text_enabled": false,
+      "mpc_pred_traj_topics": [],
+      "mpc_control_seq_topics": [
+        "/mpc_control_seq0",
+        "/mpc_control_seq1",
+        "/mpc_control_seq2",
+        "/mpc_control_seq3",
+        "/mpc_control_seq4",
+        "/mpc_control_seq5",
+        "/mpc_control_seq6",
+        "/mpc_control_seq7",
+        "/mpc_control_seq8",
+        "/mpc_control_seq9"
+      ],
+      "show_ego_sector": true,
+      "selected_vertex_source": "vertex_selector",
+      "selected_vertex_normal_topic": "/selected_vertex_normal",
+      "initial_traj_topic": "/initial_traj1",
+      "initial_traj_topics": [
+        "/initial_traj1",
+        "/initial_traj2",
+        "/initial_traj3",
+        "/initial_traj4",
+        "/initial_traj5",
+        "/initial_traj6",
+        "/initial_traj7",
+        "/initial_traj8",
+        "/initial_traj9"
+      ],
+      "mpc_pred_traj_colors": [
+        [
+          0.2,
+          0.8,
+          0.2,
+          1.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          1.0
+        ],
+        [
+          1.0,
+          0.5,
+          0.0,
+          1.0
+        ],
+        [
+          1.0,
+          0.0,
+          1.0,
+          1.0
+        ],
+        [
+          0.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0,
+          1.0
+        ],
+        [
+          1.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        [
+          0.5,
+          1.0,
+          0.0,
+          1.0
+        ],
+        [
+          0.5,
+          0.0,
+          1.0,
+          1.0
+        ],
+        [
+          1.0,
+          0.75,
+          0.0,
+          1.0
+        ]
+      ],
+      "mpc_pred_marker_width": 0.1,
+      "ego_sector_topic": "/ego_sector",
+      "ego_sector_radius_m": 1.2,
+      "ego_sector_arc_steps": 24,
+      "ego_sector_fill_color": [
+        1.0,
+        0.5,
+        0.0,
+        0.34
+      ],
+      "ego_sector_outline_color": [
+        1.0,
+        0.5,
+        0.0,
+        0.95
+      ],
+      "publish_sdf": true,
+      "sdf_topic": "/sdf",
+      "sdf_grid_x_topic": "/sdf_grid_x",
+      "sdf_grid_y_topic": "/sdf_grid_y",
+      "sdf_grid_min": -3.0,
+      "sdf_grid_max": 3.0,
+      "sdf_grid_resolution": 0.1,
+      "sdf_grid_pub_hz": 10.0,
+      "sdf_grid_batch_size": 2048
+    },
+    "vertex_selector": {
+      "hz": 20.0,
+      "input_topics": {
+        "ego_state": "/ego_state",
+        "obstacle": "/obstacle"
+      },
+      "publishers": {
+        "selected_vertex_data": "/selected_vertex_data",
+        "selected_vertex_set": "/selected_vertex_set",
+        "selected_vertex_normal": "/selected_vertex_normal",
+        "percepted_obstacle": "/percepted_obstacle",
+        "selected_vertex_horizon_data": "/selected_vertex_horizon_data"
+      },
+      "selected_vertex_marker_width": 0.16,
+      "selected_vertex_normal_arrow_length": 0.35,
+      "selected_vertex_normal_shaft_diameter": 0.035,
+      "selected_vertex_normal_head_diameter": 0.1,
+      "selected_vertex_normal_head_length": 0.1,
+      "selected_vertex_color": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "selected_vertex_normal_color": [
+        1.0,
+        0.0,
+        1.0,
+        1.0
+      ]
+    },
+    "mppi": {
+      "publishers": {
+        "initial_guidance": "/initial_guidance1",
+        "initial_traj": "/initial_traj1",
+        "initial_guidance1": "/initial_guidance1",
+        "initial_guidance2": "/initial_guidance2",
+        "initial_guidance3": "/initial_guidance3",
+        "initial_traj1": "/initial_traj1",
+        "initial_traj2": "/initial_traj2",
+        "initial_traj3": "/initial_traj3"
+      }
+    },
+    "normal_cfg": {
+      "use_ego_scaled_local_frame": true,
+      "use_probability_propagation_margin": true,
+      "fd_position_eps_m": 0.0001,
+      "fd_yaw_eps_rad": 0.0001,
+      "sigma_vx": 0.2,
+      "sigma_vy": 0.2,
+      "probability_collision": 0.8
+    }
+  }
+}

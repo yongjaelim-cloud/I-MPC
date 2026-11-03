@@ -1,0 +1,31 @@
+rosparam get /velodyne_nodelet_manager_driver/port
+sudo ethtool eth0 | grep 'Link detected'
+
+
+
+
+roslaunch velodyne_pointcloud VLP16_points.launch \
+    device_ip:=192.168.1.102 \
+    port:=2369
+    
+    
+    
+    
+roslaunch velodyne_pointcloud VLP-32C_points.launch \
+    device_ip:=192.168.1.201 \
+    port:=2368 \
+    frame_id:=velodyne
+    
+    
+    
+ego_mover_exp_soft_yaw.py _soft_update_alpha:=0.3
+    
+
+python3 velodyne_points_interest.py _fov_deg:=360.0 \
+    _z_min:=0.1 \
+    _z_max:=0.5
+   
+   
+ ** 필수 **
+rosrun tf2_ros static_transform_publisher \
+    0 0 0.8 0 0 0 1 base_link velodyne

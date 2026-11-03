@@ -1,0 +1,2 @@
+sector_id,MPC_flag,field_flag,method,left,rear,right,front,nonvulnerable_collision_count,classified_collision_count,nonvulnerable_collision_ratio,success,unresolved_collision_count
+1,4,4,Ours,7,1,2,31,34,41,0.829268293,9,0

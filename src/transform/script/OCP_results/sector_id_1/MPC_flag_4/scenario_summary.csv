@@ -1,0 +1,2 @@
+completed_scenarios,goal_reached_count,collision_count,left_collision_count,rear_collision_count,right_collision_count,front_collision_count,ambiguous_collision_count,nonvulnerable_collision_count,nonvulnerable_collision_ratio,timeout_count,mean_goal_reach_time_s
+5,0,5,0,0,3,2,0,5,1.000000000,0,

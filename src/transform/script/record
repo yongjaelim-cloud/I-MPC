@@ -1,0 +1,41 @@
+rosbag record -O visualization.bag \
+/ego_position \
+/ego_FOV \
+/ego_sector \
+/goal_position \
+/obs_polygons \
+/obs_polygons_horizon \
+/percepted_obs_polygons \
+/selected_vertex_set \
+/selected_vertex_normal \
+/vertex_selector/raycast_viz \
+/vertex_selector/line_fit_viz \
+/impact_normal_comparison \
+/mpc_separating_hyperplanes \
+/selected_traj_marker \
+/mpc_pred_trajs
+
+
+
+taskset -c 1 rosbag record -O visualization2.bag \
+/ego_position \
+/ego_FOV \
+/ego_sector \
+/goal_position \
+/obs_polygons \
+/obs_polygons_horizon \
+/percepted_obs_polygons \
+/selected_vertex_set \
+/selected_vertex_normal \
+/vertex_selector/raycast_viz \
+/vertex_selector/line_fit_viz \
+/impact_normal_comparison \
+/mpc_separating_hyperplanes \
+/selected_traj_marker \
+/mpc_pred_trajs
+
+
+
+taskset -c 1 rosbag record -O distance.bag \
+/ego_state \
+/selected_vertex_data
