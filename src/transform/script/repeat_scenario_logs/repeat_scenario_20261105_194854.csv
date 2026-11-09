@@ -1,0 +1,3 @@
+wall_time,ros_time,event,sector_id,lap,goal_idx,ego_x,ego_y,detail
+1793875734.687,1793875734.687,scenario_start,3,0,0,3.785,1.596,approach G0
+1793875734.690,1793875734.690,goal_sent,3,0,0,3.779,1.595,"(11.830, -4.338)"

@@ -408,6 +408,14 @@ class MPCPlannerTrajectoryNode:
         # /cmd_vel is the only MPC velocity source. Never derive v from pose differences.
         self.cmd_vel_topic = "/cmd_vel"
         self.latest_cmd_vel = 0.0
+        # Actual yaw-rate estimate for the yaw-rate-lag MPC model:
+        #   w' = (w_cmd - w)/tau_w,  w_cmd = /cmd_vel.angular.z,
+        # propagated exactly (ZOH) between /cmd_vel messages and planning ticks.
+        # The estimate is written to cfg.ego_yawrate0 = x0[4] every MPC tick.
+        self.lag_cmd_w = 0.0
+        self.lag_w_hat = 0.0
+        self.lag_w_stamp = None
+        self.cfg.ego_yawrate0 = 0.0
         self.last_pose_stamp = None
         self.tracked_pose_timeout_s = 0.5
         self.latest_ego_snapshot_stamp = rospy.Time(0)
@@ -558,8 +566,26 @@ class MPCPlannerTrajectoryNode:
         speed = float(msg.linear.x)
         if not math.isfinite(speed):
             return
+        yawrate_cmd = float(msg.angular.z)
         with self.tracked_pose_lock:
             self.latest_cmd_vel = max(float(self.cfg.v_min), min(float(self.cfg.v_max), speed))
+            if math.isfinite(yawrate_cmd):
+                # Advance the lag with the previous command, then switch input.
+                self.propagate_yawrate_lag_locked()
+                self.lag_cmd_w = max(float(self.cfg.yawrate_min), min(float(self.cfg.yawrate_max), yawrate_cmd))
+
+    def propagate_yawrate_lag_locked(self) -> float:
+        """Exact ZOH step of w' = (w_cmd - w)/tau_w up to now (caller holds tracked_pose_lock)."""
+        now = float(rospy.get_time())
+        last = self.lag_w_stamp
+        self.lag_w_stamp = now
+        if last is not None:
+            dt = now - float(last)
+            if math.isfinite(dt) and dt > 0.0:
+                tau = max(float(getattr(self.cfg, "yawrate_time_constant", 0.7)), 1.0e-3)
+                a = 1.0 - math.exp(-dt / tau)
+                self.lag_w_hat += a * (float(self.lag_cmd_w) - self.lag_w_hat)
+        return float(self.lag_w_hat)
 
     def tracked_pose_callback(self, msg: PoseStamped) -> None:
         """Build map-frame [x, y, cmd_vel.linear.x, yaw] for the next MPC solve."""
@@ -1287,6 +1313,8 @@ class MPCPlannerTrajectoryNode:
             # Pose callback owns x/y/yaw; speed is the last /cmd_vel.linear.x.
             self.ego_v = float(self.latest_cmd_vel)
             ego_snapshot = self.build_x0().copy()
+            # Actual (lagged) yaw rate at x0 for the 5-state MPC model.
+            self.cfg.ego_yawrate0 = self.propagate_yawrate_lag_locked()
             self.planning_cycle_id += 1
             planning_round_id = int(self.planning_cycle_id)
 

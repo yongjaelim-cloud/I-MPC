@@ -34,14 +34,30 @@ except Exception:
 from setup_config import setup_msg_to_raw
 import time
 import copy
-from tf.transformations import quaternion_multiply
 from drone_msgs.msg import obstacle_polygon, Ego_state, Setup
 from geometry_msgs.msg import Point, PoseStamped, Twist
 from sensor_msgs.msg import PointCloud2, PointField
 import tf2_ros
-from tf.transformations import quaternion_matrix
+from collections import deque
+import threading
+from types import SimpleNamespace
 from std_msgs.msg import Float64MultiArray, MultiArrayDimension
 from visualization_msgs.msg import Marker, MarkerArray
+
+
+# ROS Noetic uses the native Python 3 tf2_ros Buffer and TransformListener.
+# Keep this NumPy quaternion conversion for the existing 3-D point pipeline.
+def _quat_matrix(q):
+    q = np.asarray(q, dtype=np.float64)
+    n = float(q @ q)
+    if n < 1e-20:
+        return np.eye(3)
+    x, y, z, w = q / math.sqrt(n)
+    return np.array([
+        [1 - 2*(y*y+z*z), 2*(x*y-z*w), 2*(x*z+y*w)],
+        [2*(x*y+z*w), 1 - 2*(x*x+z*z), 2*(y*z-x*w)],
+        [2*(x*z-y*w), 2*(y*z+x*w), 1 - 2*(x*x+y*y)],
+    ], dtype=np.float64)
 
 
 def _load_setup_config(setup_topic="/setup"):
@@ -534,6 +550,18 @@ class _CppVertexPipeline(object):
                 IP, ctypes.c_int,
             ]
             self.external_fn.restype = ctypes.c_int
+        self.points_fn = getattr(self.lib, "vertex_selector_process_points", None)
+        if self.points_fn is not None:
+            self.points_fn.argtypes = [
+                DP, ctypes.c_int, ctypes.c_double, ctypes.c_double, ctypes.c_double,
+                ctypes.c_double, ctypes.c_double, ctypes.c_double,
+                ctypes.c_double, ctypes.c_int, ctypes.c_double, ctypes.c_double,
+                ctypes.c_int, ctypes.c_int,
+                DP, ctypes.c_int, DP, ctypes.c_int, DP, ctypes.c_int,
+                DP, ctypes.c_int, DP, ctypes.c_int, DP, ctypes.c_int,
+                IP, ctypes.c_int,
+            ]
+            self.points_fn.restype = ctypes.c_int
         self.motion_fn = self.lib.vertex_selector_motion_update
         self.motion_fn.argtypes = [
             DP, ctypes.c_int, DP, ctypes.c_int, ctypes.c_int,
@@ -752,6 +780,11 @@ class _CppVertexPipeline(object):
             if not rows.flags.c_contiguous:
                 rows = np.ascontiguousarray(rows)
 
+        raw_xy = None
+        if bundle is not None and "xy" in bundle:
+            raw_xy = np.ascontiguousarray(bundle["xy"], dtype=np.float64).reshape(-1, 2)
+            if self.points_fn is None:
+                raise RuntimeError("Rebuild C++ vertex library with vertex_selector_process_points")
         n_rays = int(rows.shape[0])
         base = max(8, n_rays + 2 * max(1, int(node.max_obs)))
         self._ensure_buffers(1, base, base, 2 * max(1, int(node.max_obs)) + 4,
@@ -761,8 +794,26 @@ class _CppVertexPipeline(object):
         def invoke():
             self.counts.fill(0)
             t0 = time.perf_counter()
-            rc = self.external_fn(
-                rows.ctypes.data_as(DP), n_rays,
+            if raw_xy is not None:
+                rc = self.points_fn(
+                    raw_xy.ctypes.data_as(DP), int(raw_xy.shape[0]),
+                    float(origin[0]), float(origin[1]), float(bundle["sensor_yaw"]),
+                    float(node.obs_sensing_R), 0.5,
+                    float(node.ray_cluster_gap), float(node.line_fit_max_error),
+                    int(node.line_fit_min_points), float(node.line_fit_min_length),
+                    float(node.line_intersection_max_extension),
+                    int(node.max_obs), int(node.field_flag),
+                    self.segments.ctypes.data_as(DP), int(self.segments.shape[0]),
+                    self.vertices.ctypes.data_as(DP), int(self.vertices.shape[0]),
+                    self.terminal.ctypes.data_as(DP), int(self.terminal.shape[0]),
+                    self.hits.ctypes.data_as(DP), int(self.hits.shape[0]),
+                    self.selected.ctypes.data_as(DP), int(self.selected.shape[0]),
+                    self.meta.ctypes.data_as(DP), int(self.meta.shape[0]),
+                    self.counts.ctypes.data_as(IP), int(self.counts.size),
+                )
+            else:
+                rc = self.external_fn(
+                    rows.ctypes.data_as(DP), n_rays,
                 float(origin[0]), float(origin[1]),
                 float(node.obs_sensing_R), float(node.ray_angle_step_deg),
                 float(node.ray_cluster_gap), float(node.line_fit_max_error), int(node.line_fit_min_points),
@@ -1863,7 +1914,7 @@ class VertexSelectorNode(object):
         """TF target<-source as (R 3x3, t 3, yaw about z)."""
         T = self.tf_buffer.lookup_transform(target, source, stamp, timeout).transform
         t, q = T.translation, T.rotation
-        R = quaternion_matrix([q.x, q.y, q.z, q.w])[:3, :3]
+        R = _quat_matrix([q.x, q.y, q.z, q.w])
         return R, np.array([t.x, t.y, t.z], dtype=float), math.atan2(float(R[1, 0]), float(R[0, 0]))
 
     def velodyne_points_callback(self, msg):
@@ -1911,9 +1962,11 @@ class VertexSelectorNode(object):
             rospy.logerr_throttle(2.0, "[vertex_selector] invalid PointCloud2 layout: %s", exc)
             return
 
-        # Project after filtering by local sensor-frame height, not world height.
-        valid = np.isfinite(xyz).all(axis=1)
-        valid &= (xyz[:, 2] >= self.cloud_z_min) & (xyz[:, 2] <= self.cloud_z_max)
+        # Geometry uses XY only. Optional legacy Z prefilter is disabled by default.
+        valid = np.isfinite(xyz[:, :2]).all(axis=1)
+        if rospy.get_param("~cloud_use_z_filter", False):
+            valid &= np.isfinite(xyz[:, 2])
+            valid &= (xyz[:, 2] >= self.cloud_z_min) & (xyz[:, 2] <= self.cloud_z_max)
         if pt_time is not None:
             valid &= np.isfinite(pt_time)
         xyz = xyz[valid]
@@ -1931,8 +1984,7 @@ class VertexSelectorNode(object):
             rospy.logwarn_throttle(2.0, "[vertex_selector] invalid cloud frame/stamp")
             return
         motion_frame = self.cloud_motion_frame
-        tf_errors = (tf2_ros.LookupException, tf2_ros.ConnectivityException,
-                     tf2_ros.ExtrapolationException, LookupError)
+        tf_errors = (tf2_ros.TransformException, LookupError)
         if self.ego_motion_source == "tracked_pose" and self.ego_motion.pop_frame_reset():
             # /tracked_pose gap or clock jump: ego_local is no longer continuous.
             self._motion_frame_reset = True
@@ -2102,6 +2154,8 @@ class VertexSelectorNode(object):
         # stamp and frame conversion from different clouds.
         self.latest_cloud_motion = {
             "rows": rows,
+            "xy": np.ascontiguousarray(motion_xyz[:, :2][valid], dtype=np.float64),
+            "sensor_yaw": float(sensor_yaw),
             "origin": (float(sensor_origin[0]), float(sensor_origin[1])),
             "R": R2_mm, "t": t2_mm, "yaw": float(yaw_mm),
             "stamp": cloud_stamp, "frame": motion_frame,
@@ -2109,7 +2163,7 @@ class VertexSelectorNode(object):
         self.latest_raycast_rows = rows_map
         self.latest_cloud_origin = (float(origin_map[0]), float(origin_map[1]))
         self.latest_raycast_observation_stamp = cloud_stamp
-        self.ray_angle_step_deg = step
+        self.ray_angle_step_deg = 0.5
         self.raycast_sequence += 1
         self.have_raycast_cloud = True
         rospy.loginfo_throttle(5.0, "[vertex_selector] cloud 3D->2D: %d points, %d hits / %d rays, frame=%s, deskew=%s, "
@@ -2500,25 +2554,14 @@ class VertexSelectorNode(object):
         return np.abs(np.dot(P - P[0].reshape(1, 2), normal))
 
     def split_and_fit_lines(self, points, depth=0):
-        """Recursive split-and-fit using ray-ordered hit points."""
-        P = np.asarray(points, dtype=float).reshape(-1, 2)
-        if P.shape[0] < 2:
-            return []
+        """Fit exactly one TLS segment per spatially continuous hit cluster.
 
-        min_pts = max(2, int(self.line_fit_min_points))
-        residuals = self._split_residuals_from_endpoint_line(P)
-        split_idx = int(np.argmax(residuals)) if residuals.size else 0
-        can_split = (
-            depth < 12
-            and P.shape[0] >= 2 * min_pts - 1
-            and float(residuals[split_idx]) > float(self.line_fit_max_error)
-            and split_idx >= min_pts - 1
-            and (P.shape[0] - split_idx) >= min_pts
-        )
-        if can_split:
-            left = self.split_and_fit_lines(P[:split_idx + 1], depth + 1)
-            right = self.split_and_fit_lines(P[split_idx:], depth + 1)
-            return left + right
+        Keep the legacy method name for existing Python call sites.  The
+        terminal-ray intersection and vertex construction are unchanged.
+        """
+        P = np.asarray(points, dtype=float).reshape(-1, 2)
+        if P.shape[0] < max(2, int(self.line_fit_min_points)):
+            return []
 
         fit = self.fit_line_tls(P)
         if fit is None:
@@ -2526,8 +2569,6 @@ class VertexSelectorNode(object):
         if float(np.linalg.norm(fit["end"] - fit["start"])) < float(self.line_fit_min_length):
             return []
 
-        # Visible obstacle surfaces face the ego.  Resolve the TLS normal sign
-        # toward the ego to obtain an outward surface normal.
         ego_xy = np.array([float(self.ego_x), float(self.ego_y)], dtype=float)
         n_out = np.asarray(fit["normal"], dtype=float).reshape(2)
         if float(np.dot(n_out, ego_xy - fit["center"])) < 0.0:

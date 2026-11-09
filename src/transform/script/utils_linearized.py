@@ -295,6 +295,8 @@ class MPCConfig(object):
         "goal_z": None,
         "yawrate_min": None,
         "yawrate_max": None,
+        "yawrate_time_constant": None,
+        "ego_yawrate0": None,
         "a_min": None,
         "a_max": None,
         "v_min": None,
@@ -486,6 +488,14 @@ class MPCConfig(object):
         # Bounds.
         self.yawrate_min = -0.6
         self.yawrate_max = 0.6
+        # First-order yaw-rate actuator lag used by every MPC prediction model:
+        #   yaw' = yawrate,  yawrate' = (yawrate_cmd - yawrate) / yawrate_time_constant.
+        # The MPC state is therefore x = [px, py, v, yaw, yawrate] and the
+        # control u[0] is the commanded yaw rate.
+        self.yawrate_time_constant = 0.7
+        # Actual (lagged) yaw rate at x0. The ROS planners refresh this every
+        # planning cycle; rollouts given a four-state x0 use it as x0[4].
+        self.ego_yawrate0 = 0.0
         self.a_min = -0.0
         self.a_max = 0.0
         self.v_min = -10.0
@@ -5068,15 +5078,42 @@ def impact_normal_constraint_enabled(cfg: MPCConfig) -> bool:
     )
 
 
+EGO_STATE_DIM = 5  # [px, py, v, yaw, yawrate]
+
+
+def yawrate_time_constant(cfg: Any) -> float:
+    """Return the first-order yaw-rate lag time constant tau_w [s] (> 0)."""
+    tau = _finite_or_default(getattr(cfg, "yawrate_time_constant", 0.7), 0.7)
+    return max(float(tau), 1.0e-3)
+
+
+def augment_ego_state(x: np.ndarray, cfg: Any, yawrate0: Optional[float] = None) -> np.ndarray:
+    """Return the five-state MPC vector [px, py, v, yaw, yawrate].
+
+    A five-element input is returned as-is.  For a four-element pose/speed
+    state the actual yaw rate is taken from ``yawrate0`` when given, otherwise
+    from ``cfg.ego_yawrate0`` (refreshed by the ROS planners every cycle).
+    """
+    arr = np.asarray(x, dtype=float).reshape(-1)
+    if arr.size >= EGO_STATE_DIM:
+        return arr[:EGO_STATE_DIM].copy()
+    if arr.size != 4:
+        raise ValueError("ego state must have 4 or 5 entries, got {}".format(arr.size))
+    if yawrate0 is None:
+        yawrate0 = _finite_or_default(getattr(cfg, "ego_yawrate0", 0.0), 0.0)
+    return np.array([arr[0], arr[1], arr[2], arr[3], float(yawrate0)], dtype=float)
+
+
 def build_linearized_dynamics_sequence(
     X_bar: np.ndarray,
     U_bar: np.ndarray,
     dt_vals: Sequence[float],
     cfg: MPCConfig,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """C++ RK4 first-order dynamics linearization.
+    """C++ RK4 first-order linearization of the yaw-rate-lag kinematics.
 
-    Returns ``(x_next_bar, A, B, F)`` with shapes Hx4, Hx4x4, Hx4x2, Hx4.
+    State x=[px,py,v,yaw,w], input u=[w_cmd,a] with w'=(w_cmd-w)/tau_w.
+    Returns ``(x_next_bar, A, B, F)`` with shapes Hx5, Hx5x5, Hx5x2, Hx5.
     The same coefficients serve two paths.  With nonlinear dynamics they are
     used only to compose the externally linearized collision residual at
     x_{k+1} with (x_k, delta_u_k).  With ``nonlinear_dyn_flag=false`` they are
@@ -5084,25 +5121,28 @@ def build_linearized_dynamics_sequence(
     model x_{k+1}=Fbar_k+A_k(x_k-xbar_k)+B_k delta_u_k.
     """
     require_cpp_acceleration()
-    if not hasattr(collision_lin_cpp, "build_dynamics_lin_seq"):
-        raise RuntimeError("collision_lin_cpp.build_dynamics_lin_seq is required")
-    X = np.ascontiguousarray(np.asarray(X_bar, dtype=np.float64).reshape(-1, 4))
+    if not hasattr(collision_lin_cpp, "build_dynamics_lag_lin_seq"):
+        raise RuntimeError(
+            "collision_lin_cpp.build_dynamics_lag_lin_seq is required; rebuild with build_collision_lin_cpp.sh"
+        )
+    nx = EGO_STATE_DIM
+    X = np.ascontiguousarray(np.asarray(X_bar, dtype=np.float64).reshape(-1, nx))
     U = np.ascontiguousarray(np.asarray(U_bar, dtype=np.float64).reshape(-1, 2))
     if X.shape[0] != U.shape[0]:
         raise ValueError("X_bar and U_bar must have the same horizon length")
     dt = np.ascontiguousarray(np.asarray(dt_vals, dtype=np.float64).reshape(-1))
     try:
-        x_next, A, B, F = collision_lin_cpp.build_dynamics_lin_seq(
-            X, U, dt, float(cfg.v_min), float(cfg.v_max)
+        x_next, A, B, F = collision_lin_cpp.build_dynamics_lag_lin_seq(
+            X, U, dt, float(cfg.v_min), float(cfg.v_max), yawrate_time_constant(cfg)
         )
     except Exception as exc:
-        globals()["_collision_lin_cpp_runtime_error"] = "build_dynamics_lin_seq: " + repr(exc)
+        globals()["_collision_lin_cpp_runtime_error"] = "build_dynamics_lag_lin_seq: " + repr(exc)
         raise RuntimeError("C++ dynamics linearization failed: {!r}".format(exc)) from exc
     H = X.shape[0]
-    x_next = np.asarray(x_next, dtype=float).reshape(H, 4)
-    A = np.asarray(A, dtype=float).reshape(H, 4, 4)
-    B = np.asarray(B, dtype=float).reshape(H, 4, 2)
-    F = np.asarray(F, dtype=float).reshape(H, 4)
+    x_next = np.asarray(x_next, dtype=float).reshape(H, nx)
+    A = np.asarray(A, dtype=float).reshape(H, nx, nx)
+    B = np.asarray(B, dtype=float).reshape(H, nx, 2)
+    F = np.asarray(F, dtype=float).reshape(H, nx)
     if not (np.all(np.isfinite(x_next)) and np.all(np.isfinite(A)) and np.all(np.isfinite(B)) and np.all(np.isfinite(F))):
         raise RuntimeError("C++ dynamics linearization returned non-finite coefficients")
     return x_next, A, B, F
@@ -5120,52 +5160,67 @@ def compose_collision_linearization_through_dynamics(
     ``collision_lin_seq`` contains four 7-value blocks per stage.  Before this
     composition each block is interpreted as
 
-        [g_bar, dg/dx_next (4), auxiliary_0, auxiliary_1].
+        [g_bar, dg/dx_next (4: px,py,v,yaw), auxiliary_0, auxiliary_1].
 
-    The returned block is
+    The returned block has 8 values,
 
-        [g_stage_bar, dg/dx_k (4), dg/d(delta_u_k) (2)],
+        [g_stage_bar, dg/dx_k (5: px,py,v,yaw,yawrate), dg/d(delta_u_k) (2)],
 
-    where ``delta_u_k`` is [delta_yawrate, delta_acc].  Thus the acados path
-    constraint can be written as a genuinely affine function of the stage
-    decision variables while ``model.disc_dyn_expr`` remains the nonlinear RK4
-    map.
+    where ``delta_u_k`` is [delta_yawrate_cmd, delta_acc].  The collision
+    geometry does not depend on the yaw-rate state directly, but x_{k+1} does
+    through the lag dynamics, so dg/dyawrate_k is generally nonzero.
 
     The constant correction ``dg/dx_next @ (F_bar-x_next_bar)`` preserves the
     original first-order model even when a supplied warm-start trajectory is
     not exactly dynamically consistent.
     """
+    nx = EGO_STATE_DIM
     raw = np.asarray(collision_lin_seq, dtype=float).reshape(-1, 4, 7)
     H = int(raw.shape[0])
     x_col = np.asarray(collision_state_nominal, dtype=float).reshape(H, 4)
-    x_dyn = np.asarray(dynamics_next_nominal, dtype=float).reshape(H, 4)
-    A = np.asarray(dynamics_A, dtype=float).reshape(H, 4, 4)
-    B = np.asarray(dynamics_B, dtype=float).reshape(H, 4, 2)
+    x_dyn = np.asarray(dynamics_next_nominal, dtype=float).reshape(H, nx)
+    A = np.asarray(dynamics_A, dtype=float).reshape(H, nx, nx)
+    B = np.asarray(dynamics_B, dtype=float).reshape(H, nx, 2)
 
-    out = np.zeros_like(raw)
+    out = np.zeros((H, 4, 1 + nx + 2), dtype=float)
     grad_next = raw[:, :, 1:5]
-    dyn_mismatch = x_dyn - x_col
+    dyn_mismatch = x_dyn[:, :4] - x_col
 
     out[:, :, 0] = raw[:, :, 0] + np.einsum(
         "hbi,hi->hb", grad_next, dyn_mismatch
     )
-    out[:, :, 1:5] = np.einsum("hbi,hij->hbj", grad_next, A)
-    out[:, :, 5:7] = np.einsum("hbi,hij->hbj", grad_next, B)
+    out[:, :, 1:1 + nx] = np.einsum("hbi,hij->hbj", grad_next, A[:, :4, :])
+    out[:, :, 1 + nx:3 + nx] = np.einsum("hbi,hij->hbj", grad_next, B[:, :4, :])
 
     if not np.all(np.isfinite(out)):
         raise RuntimeError("composed collision/dynamics linearization is non-finite")
-    return out.reshape(H, 28)
+    return out.reshape(H, 4 * (1 + nx + 2))
 
 
 def step_ego_dynamics(x: np.ndarray, u: np.ndarray, dt: float, cfg: MPCConfig) -> np.ndarray:
-    x = np.asarray(x, dtype=float).reshape(4).copy()
+    """One RK4 step.
+
+    A five-state input [px,py,v,yaw,yawrate] is propagated with the
+    first-order yaw-rate lag (tau_w = cfg.yawrate_time_constant) and a
+    five-state result is returned.  A legacy four-state input keeps the
+    original behaviour (u[0] is applied directly as the yaw rate) so the
+    ego_mover simulators, which model the actuator lag themselves, are
+    unaffected.
+    """
+    x = np.asarray(x, dtype=float).reshape(-1).copy()
+    lag = x.size >= EGO_STATE_DIM
+    x = x[:EGO_STATE_DIM] if lag else x.reshape(4)
     u = np.asarray(u, dtype=float).reshape(2).copy()
     u[0] = min(max(float(u[0]), cfg.yawrate_min), cfg.yawrate_max)
     u[1] = min(max(float(u[1]), cfg.a_min), cfg.a_max)
+    tau = yawrate_time_constant(cfg)
 
     def f(xl: np.ndarray) -> np.ndarray:
         v = min(max(float(xl[2]), cfg.v_min), cfg.v_max)
         yaw = float(xl[3])
+        if lag:
+            w = float(xl[4])
+            return np.array([v * math.cos(yaw), v * math.sin(yaw), u[1], w, (u[0] - w) / tau], dtype=float)
         return np.array([v * math.cos(yaw), v * math.sin(yaw), u[1], u[0]], dtype=float)
 
     k1 = f(x)
@@ -5178,40 +5233,60 @@ def step_ego_dynamics(x: np.ndarray, u: np.ndarray, dt: float, cfg: MPCConfig) -
     return x_next
 
 
-def rollout_ego(x0: np.ndarray, U: np.ndarray, dt: float, cfg: MPCConfig) -> np.ndarray:
-    """Roll out the full sequential RK4 horizon in the mandatory C++ kernel.
+def rollout_ego(
+    x0: np.ndarray,
+    U: np.ndarray,
+    dt: float,
+    cfg: MPCConfig,
+    yawrate0: Optional[float] = None,
+    return_full_state: bool = False,
+) -> np.ndarray:
+    """Roll out the yaw-rate-lag RK4 horizon in the mandatory C++ kernel.
+
+    ``x0`` may be [px,py,v,yaw] (actual yaw rate from ``yawrate0`` or
+    ``cfg.ego_yawrate0``) or [px,py,v,yaw,yawrate].  ``U[0]`` is the commanded
+    yaw rate, tracked with w'=(w_cmd-w)/cfg.yawrate_time_constant.
+
+    Returns the 4 x (N+1) [px,py,v,yaw] trajectory used by all planners and
+    messages, or the 5 x (N+1) solver state when ``return_full_state=True``.
 
     The horizon is dynamically sequential, so stages cannot be evaluated independently.
     Python rollout fallback is disabled to make accelerator/build failures explicit.
     """
+    nx = EGO_STATE_DIM
     U_arr = np.asarray(U, dtype=float).reshape(2, -1)
-    x0_arr = np.asarray(x0, dtype=float).reshape(4)
+    x0_arr = augment_ego_state(x0, cfg, yawrate0)
     N = int(U_arr.shape[1])
 
     require_cpp_acceleration()
-    if not hasattr(collision_lin_cpp, "rollout_ego_seq"):
-        raise RuntimeError("collision_lin_cpp.rollout_ego_seq is required; Python fallback is disabled")
+    if not hasattr(collision_lin_cpp, "rollout_ego_lag_seq"):
+        raise RuntimeError(
+            "collision_lin_cpp.rollout_ego_lag_seq is required; rebuild with build_collision_lin_cpp.sh"
+        )
     try:
         U_cpp = np.ascontiguousarray(U_arr.T, dtype=np.float64)
         dt_cpp = np.asarray([float(dt)], dtype=np.float64)
-        X_cpp = collision_lin_cpp.rollout_ego_seq(
+        X_cpp = collision_lin_cpp.rollout_ego_lag_seq(
             np.ascontiguousarray(x0_arr, dtype=np.float64),
             U_cpp, dt_cpp,
             float(cfg.yawrate_min), float(cfg.yawrate_max),
             float(cfg.a_min), float(cfg.a_max),
             float(cfg.v_min), float(cfg.v_max),
+            yawrate_time_constant(cfg),
         )
-        X_cpp = np.asarray(X_cpp, dtype=float).reshape(N + 1, 4)
+        X_cpp = np.asarray(X_cpp, dtype=float).reshape(N + 1, nx)
     except Exception as exc:
-        globals()["_collision_lin_cpp_runtime_error"] = "rollout_ego_seq: " + repr(exc)
+        globals()["_collision_lin_cpp_runtime_error"] = "rollout_ego_lag_seq: " + repr(exc)
         raise RuntimeError(
-            "collision_lin_cpp.rollout_ego_seq failed; Python fallback is disabled: {!r}".format(exc)
+            "collision_lin_cpp.rollout_ego_lag_seq failed; Python fallback is disabled: {!r}".format(exc)
         ) from exc
     if not np.all(np.isfinite(X_cpp)):
-        msg = "rollout_ego_seq returned non-finite values"
+        msg = "rollout_ego_lag_seq returned non-finite values"
         globals()["_collision_lin_cpp_runtime_error"] = msg
         raise RuntimeError(msg + "; Python fallback is disabled")
-    return X_cpp.T
+    if return_full_state:
+        return X_cpp.T
+    return X_cpp[:, :4].T.copy()
 
 
 def build_bspline_tracking_nominal(
@@ -5233,7 +5308,7 @@ def build_bspline_tracking_nominal(
     used as the Stage-2 linearization point.
     """
     N = int(cfg.N)
-    x0_arr = np.asarray(x0, dtype=float).reshape(4).copy()
+    x0_arr = augment_ego_state(x0, cfg)
     x0_arr[3] = wrap_to_pi(float(x0_arr[3]))
     dt_nom = float(cfg.dt_init)
 
@@ -5294,7 +5369,7 @@ def build_bspline_tracking_nominal(
     kp_vel = max(_finite_or_default(getattr(cfg, "stage1_velocity_gain", 2.0), 2.0), 0.0)
 
     U_track = np.zeros((2, N), dtype=float)
-    X_track = np.zeros((4, N + 1), dtype=float)
+    X_track = np.zeros((EGO_STATE_DIM, N + 1), dtype=float)
     X_track[:, 0] = x0_arr
     for k in range(N):
         xk = X_track[:, k]
@@ -5347,7 +5422,7 @@ def construct_acados_solver(cfg: MPCConfig, *_legacy_cfg: Any):
     refinement iteration.
 
     mpc_flag=4:
-        x = [px, py, v, yaw]
+        x = [px, py, v, yaw, yawrate]   (yawrate' = (yawrate_cmd - yawrate)/tau_w)
         u = [delta_yawrate, delta_acc, s^a, s^r] when impact-normal regulation is enabled
         u = [delta_yawrate, delta_acc, s^a] when it is disabled
 
@@ -5373,15 +5448,16 @@ def construct_acados_solver(cfg: MPCConfig, *_legacy_cfg: Any):
     formulation_flag = mpc_formulation_flag(cfg)
     proposed = formulation_flag == 4
 
-    nx = 4
-    nx_param = 4
+    nx = EGO_STATE_DIM
+    nx_param = EGO_STATE_DIM
     collision_state_nx = 4
+    tau_w = yawrate_time_constant(cfg)
     # Each externally built collision row is affine in the current shooting
-    # state x_k (4 variables) and the two physical control increments.  Slack
+    # state x_k (5 variables) and the two physical control increments.  Slack
     # variables are appended exactly as -s_j when the complete residual
     # g_j = gbar_j - s_j is assembled below, so they are not part of this
     # native state/control gradient block.
-    collision_decision_dim = 6
+    collision_decision_dim = nx + 2
     active_slack_count = proposed_active_slack_count(cfg) if proposed else 4
     nu = 2 + active_slack_count
     collision_block_count = active_slack_count
@@ -5399,9 +5475,9 @@ def construct_acados_solver(cfg: MPCConfig, *_legacy_cfg: Any):
     collision_lin_np = collision_block_count * (1 + collision_decision_dim)
     collision_lin_offset = collision_state_offset + collision_state_nx
     linearized_dynamics = not nonlinear_dynamics_enabled(cfg)
-    dyn_A_np = 16 if linearized_dynamics else 0
-    dyn_B_np = 8 if linearized_dynamics else 0
-    dyn_F_np = 4 if linearized_dynamics else 0
+    dyn_A_np = nx * nx if linearized_dynamics else 0
+    dyn_B_np = nx * 2 if linearized_dynamics else 0
+    dyn_F_np = nx if linearized_dynamics else 0
     dyn_A_offset = collision_lin_offset + collision_lin_np
     dyn_B_offset = dyn_A_offset + dyn_A_np
     dyn_F_offset = dyn_B_offset + dyn_B_np
@@ -5413,7 +5489,8 @@ def construct_acados_solver(cfg: MPCConfig, *_legacy_cfg: Any):
     py = ca.SX.sym("py")
     v = ca.SX.sym("v")
     yaw = ca.SX.sym("yaw")
-    x = ca.vertcat(px, py, v, yaw)
+    yawrate = ca.SX.sym("yawrate")
+    x = ca.vertcat(px, py, v, yaw, yawrate)
 
     delta_yawrate = ca.SX.sym("delta_yawrate")
     delta_acc = ca.SX.sym("delta_acc")
@@ -5428,24 +5505,27 @@ def construct_acados_solver(cfg: MPCConfig, *_legacy_cfg: Any):
     yawrate_abs = u_bar[0] + delta_yawrate
     acc_abs = u_bar[1] + delta_acc
     dt_fixed = float(cfg.dt_init)
-    x_core = ca.vertcat(px, py, v, yaw)
+    x_core = ca.vertcat(px, py, v, yaw, yawrate)
 
     if linearized_dynamics:
         # Exact first-order affine model around the current nominal stage:
         #   x+ = Fbar + A (x-xbar) + B delta_u.
         # A, B, and Fbar are updated through p at every outer refinement.
-        A_dyn = ca.reshape(p[dyn_A_offset:dyn_A_offset + dyn_A_np], 4, 4)
-        B_dyn = ca.reshape(p[dyn_B_offset:dyn_B_offset + dyn_B_np], 4, 2)
+        A_dyn = ca.reshape(p[dyn_A_offset:dyn_A_offset + dyn_A_np], nx, nx)
+        B_dyn = ca.reshape(p[dyn_B_offset:dyn_B_offset + dyn_B_np], nx, 2)
         F_dyn = p[dyn_F_offset:dyn_F_offset + dyn_F_np]
         delta_u_core = ca.vertcat(delta_yawrate, delta_acc)
         disc_dyn_expr = F_dyn + ca.mtimes(A_dyn, x_core - x_bar) + ca.mtimes(B_dyn, delta_u_core)
     else:
         def nonlinear_core_rhs(xi):
+            # yawrate_abs is the commanded yaw rate; the actual yaw rate xi[4]
+            # follows it through a first-order lag with time constant tau_w.
             return ca.vertcat(
                 xi[2] * ca.cos(xi[3]),
                 xi[2] * ca.sin(xi[3]),
                 acc_abs,
-                yawrate_abs,
+                xi[4],
+                (yawrate_abs - xi[4]) / tau_w,
             )
 
         k1 = nonlinear_core_rhs(x_core)
@@ -5454,7 +5534,7 @@ def construct_acados_solver(cfg: MPCConfig, *_legacy_cfg: Any):
         k4 = nonlinear_core_rhs(x_core + dt_fixed * k3)
         core_next = x_core + (dt_fixed / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
         yaw_next = ca.atan2(ca.sin(core_next[3]), ca.cos(core_next[3]))
-        disc_dyn_expr = ca.vertcat(core_next[0], core_next[1], core_next[2], yaw_next)
+        disc_dyn_expr = ca.vertcat(core_next[0], core_next[1], core_next[2], yaw_next, core_next[4])
 
     collision_enabled = collision_avoidance_constraints_enabled(cfg) and nh > 0
     if collision_enabled and not use_direct_collision_linearization:
@@ -5470,7 +5550,7 @@ def construct_acados_solver(cfg: MPCConfig, *_legacy_cfg: Any):
         # affine in the stage variables.  When nonlinear_dyn_flag=false the
         # shooting dynamics are affine as well, so the full subproblem is QP.
         collision_stage_delta = ca.vertcat(
-            x[:4] - x_bar,
+            x - x_bar,
             delta_yawrate,
             delta_acc,
         )
@@ -5525,7 +5605,8 @@ def construct_acados_solver(cfg: MPCConfig, *_legacy_cfg: Any):
     Vu = np.zeros((ny, nu), dtype=float)
     Vx[0:4, 0:4] = np.eye(4, dtype=float)
     Vu[4:4 + nu, 0:nu] = np.eye(nu, dtype=float)
-    Vx_e = np.eye(nx, dtype=float)
+    Vx_e = np.zeros((ny_e, nx), dtype=float)
+    Vx_e[0:4, 0:4] = np.eye(4, dtype=float)
 
     slack_weights = surface_slack_cost_weights(cfg)
     active_slack_weights = slack_weights[:active_slack_count]
@@ -5546,10 +5627,11 @@ def construct_acados_solver(cfg: MPCConfig, *_legacy_cfg: Any):
     ocp.cost.yref = np.zeros(ny, dtype=float)
     ocp.cost.yref_e = np.zeros(ny_e, dtype=float)
 
-    # State and input bounds.  Every formulation has the same four physical states.
-    ocp.constraints.idxbx_0 = np.array([0, 1, 2, 3], dtype=np.int64)
+    # State and input bounds.  Every formulation has the same five states [px,py,v,yaw,yawrate].
+    ocp.constraints.idxbx_0 = np.arange(nx, dtype=np.int64)
     ocp.constraints.lbx_0 = np.array([
-        cfg.ego_x, cfg.ego_y, cfg.ego_v0, cfg.ego_yaw0
+        cfg.ego_x, cfg.ego_y, cfg.ego_v0, cfg.ego_yaw0,
+        _finite_or_default(getattr(cfg, "ego_yawrate0", 0.0), 0.0),
     ], dtype=float)
     ocp.constraints.ubx_0 = ocp.constraints.lbx_0.copy()
     ocp.constraints.idxbx = np.array([2], dtype=np.int64)
@@ -5580,7 +5662,7 @@ def construct_acados_solver(cfg: MPCConfig, *_legacy_cfg: Any):
     ocp.constraints.lh_e = -float(cfg.h_upper_bound) * np.ones(nh_terminal, dtype=float)
     ocp.constraints.uh_e = np.zeros(nh_terminal, dtype=float)
 
-    default_xbar = np.array([cfg.ego_x, cfg.ego_y, cfg.ego_v0, cfg.ego_yaw0], dtype=float)
+    default_xbar = np.array([cfg.ego_x, cfg.ego_y, cfg.ego_v0, cfg.ego_yaw0, 0.0], dtype=float)
     default_ubar = np.zeros(nu, dtype=float)
     default_p = np.zeros(np_param, dtype=float)
     if param_nh > 0:
@@ -5590,7 +5672,7 @@ def construct_acados_solver(cfg: MPCConfig, *_legacy_cfg: Any):
     default_p[sector_offset:sector_offset + sector_np] = sector_rays_to_parameter_vector(None, cfg)
     default_p[x_param_offset:x_param_offset + nx_param] = default_xbar
     default_p[u_param_offset:u_param_offset + nu] = default_ubar
-    default_p[collision_state_offset:collision_state_offset + collision_state_nx] = default_xbar
+    default_p[collision_state_offset:collision_state_offset + collision_state_nx] = default_xbar[:collision_state_nx]
     for j in range(collision_block_count):
         default_p[collision_lin_offset + j * (1 + collision_decision_dim)] = -float(
             getattr(cfg, "h_upper_bound", 1.0e15)
@@ -5598,8 +5680,8 @@ def construct_acados_solver(cfg: MPCConfig, *_legacy_cfg: Any):
     if linearized_dynamics:
         # Safe construction-time affine map. Runtime coefficients overwrite
         # these at every stage before solve(). CasADi reshape is column-major.
-        default_p[dyn_A_offset:dyn_A_offset + dyn_A_np] = np.eye(4, dtype=float).reshape(-1, order="F")
-        default_p[dyn_B_offset:dyn_B_offset + dyn_B_np] = np.zeros(8, dtype=float)
+        default_p[dyn_A_offset:dyn_A_offset + dyn_A_np] = np.eye(nx, dtype=float).reshape(-1, order="F")
+        default_p[dyn_B_offset:dyn_B_offset + dyn_B_np] = np.zeros(nx * 2, dtype=float)
         default_p[dyn_F_offset:dyn_F_offset + dyn_F_np] = default_xbar
     ocp.parameter_values = default_p
 
@@ -5755,7 +5837,7 @@ class AcadosMPCPlanner:
             return None
 
     def _solver_state_dim(self) -> int:
-        return 4
+        return EGO_STATE_DIM
 
     def _solver_input_dim(self) -> int:
         if mpc_formulation_flag(self.cfg) == 4:
@@ -5944,12 +6026,13 @@ class AcadosMPCPlanner:
         return U
 
     def _make_augmented_warm_start(self, x0: np.ndarray, U: np.ndarray) -> np.ndarray:
-        """Return the fixed-dt four-state rollout used as SQP warm start."""
+        """Return the fixed-dt five-state (yaw-rate lag) rollout used as SQP warm start."""
         cfg = self.cfg
         N = int(cfg.N)
         U_arr = np.asarray(U, dtype=float).reshape(6, N)
         return rollout_ego(
-            np.asarray(x0, dtype=float).reshape(4), U_arr[:2, :], float(cfg.dt_init), cfg
+            augment_ego_state(x0, cfg), U_arr[:2, :], float(cfg.dt_init), cfg,
+            return_full_state=True,
         )
 
 
@@ -5966,7 +6049,7 @@ class AcadosMPCPlanner:
         except Exception:
             order_i = 1
         self.U_warm = self._make_bias_control(order_i)
-        self.X_warm = self._make_augmented_warm_start(np.asarray(x0, dtype=float).reshape(4), self.U_warm)
+        self.X_warm = self._make_augmented_warm_start(augment_ego_state(x0, cfg), self.U_warm)
 
     def _coerce_initial_nominal(
         self,
@@ -5988,7 +6071,7 @@ class AcadosMPCPlanner:
 
         cfg = self.cfg
         N = int(cfg.N)
-        x0_arr = np.asarray(x0, dtype=float).reshape(4)
+        x0_arr = augment_ego_state(x0, cfg)
         U_aug = self._make_bias_control(order)
         if initial_U is not None:
             try:
@@ -6123,8 +6206,11 @@ class AcadosMPCPlanner:
             X_aug = self._make_augmented_warm_start(x0, U_aug)
         else:
             state_dim = self._solver_state_dim()
-            X_aug = np.asarray(fallback_X_bar, dtype=float).reshape(state_dim, N + 1).copy()
-            X_aug[:4, 0] = np.asarray(x0, dtype=float).reshape(4)
+            X_in = np.asarray(fallback_X_bar, dtype=float).reshape(-1, N + 1)
+            X_aug = np.zeros((state_dim, N + 1), dtype=float)
+            rows = min(state_dim, int(X_in.shape[0]))
+            X_aug[:rows, :] = X_in[:rows, :]
+            X_aug[:, 0] = augment_ego_state(x0, cfg)
             X_aug[3, :] = np.arctan2(np.sin(X_aug[3, :]), np.cos(X_aug[3, :]))
         return PlanResult(
             U=U_aug[:2, :].copy(),
@@ -6222,6 +6308,7 @@ class AcadosMPCPlanner:
         # Dynamics are linearized once around the current nominal whenever they
         # are needed either by the affine shooting mode or by collision-row
         # composition.  This avoids duplicate RK4 Jacobian work.
+        nx = self._solver_state_dim()
         collision_nominal = X_bar[:4, 1:N + 1].T.copy()
         direct_collision = collision_constraint_enabled and compact_direct_params
         linearized_dynamics = not nonlinear_dynamics_enabled(cfg)
@@ -6233,7 +6320,7 @@ class AcadosMPCPlanner:
         dt_seq = np.full(N, float(cfg.dt_init), dtype=float)
         if linearized_dynamics or direct_collision:
             dyn_next_bar, dyn_A, dyn_B, _ = build_linearized_dynamics_sequence(
-                X_bar[:4, :N].T,
+                X_bar[:, :N].T,
                 U_bar[:2, :].T,
                 dt_seq,
                 cfg,
@@ -6262,7 +6349,7 @@ class AcadosMPCPlanner:
         )
         self._active_solver_collision_lin_seq = (
             None if collision_lin_seq is None else
-            np.asarray(collision_lin_seq, dtype=float).reshape(N, 4, 7).copy()
+            np.asarray(collision_lin_seq, dtype=float).reshape(N, 4, 1 + nx + 2).copy()
         )
 
         # Stage-wise position reference p_{r,k}:
@@ -6300,14 +6387,15 @@ class AcadosMPCPlanner:
         sector_np = 6
         param_M = 0 if compact_direct_params else M
         base_np = 3 * param_M + sector_np
+        col_block_np = 1 + nx + 2
         x_off = base_np
-        u_off = x_off + 4
+        u_off = x_off + nx
         col_state_off = u_off + solver_nu
         col_off = col_state_off + 4
-        collision_np = collision_block_count * 7
-        dyn_A_np = 16 if linearized_dynamics else 0
-        dyn_B_np = 8 if linearized_dynamics else 0
-        dyn_F_np = 4 if linearized_dynamics else 0
+        collision_np = collision_block_count * col_block_np
+        dyn_A_np = nx * nx if linearized_dynamics else 0
+        dyn_B_np = nx * 2 if linearized_dynamics else 0
+        dyn_F_np = nx if linearized_dynamics else 0
         dyn_A_off = col_off + collision_np
         dyn_B_off = dyn_A_off + dyn_A_np
         dyn_F_off = dyn_B_off + dyn_B_np
@@ -6324,7 +6412,7 @@ class AcadosMPCPlanner:
                 hs_seq = np.tile(halfspaces[:param_M].reshape(1, param_M, 3), (N + 1, 1, 1))
             p_mat[:, 0:3 * param_M] = hs_seq.reshape(N + 1, 3 * param_M)
 
-        X_stage = X_bar[:4, :].T.astype(float, copy=True)
+        X_stage = X_bar[:, :].T.astype(float, copy=True)
         X_stage[:, 3] = np.arctan2(np.sin(X_stage[:, 3]), np.cos(X_stage[:, 3]))
 
         U_stage_full = np.empty((N + 1, 6), dtype=float)
@@ -6340,14 +6428,14 @@ class AcadosMPCPlanner:
 
         X_col_stage = np.empty((N + 1, 4), dtype=float)
         X_col_stage[:N, :] = collision_nominal
-        X_col_stage[N, :] = collision_nominal[-1, :] if N > 0 else X_stage[N, :]
+        X_col_stage[N, :] = collision_nominal[-1, :] if N > 0 else X_stage[N, :4]
         p_mat[:, col_state_off:col_off] = X_col_stage
 
         disabled = -float(getattr(cfg, "h_upper_bound", 1.0e15))
-        compact_blocks = np.zeros((N + 1, collision_block_count, 7), dtype=float)
+        compact_blocks = np.zeros((N + 1, collision_block_count, col_block_np), dtype=float)
         compact_blocks[:, :, 0] = disabled
         if direct_collision and collision_lin_seq is not None:
-            raw_blocks = np.asarray(collision_lin_seq, dtype=float).reshape(N, 4, 7)
+            raw_blocks = np.asarray(collision_lin_seq, dtype=float).reshape(N, 4, col_block_np)
             compact_blocks[:N, :, :] = raw_blocks[:, :collision_block_count, :]
         p_mat[:, col_off:col_off + collision_np] = compact_blocks.reshape(N + 1, -1)
 
@@ -6357,14 +6445,14 @@ class AcadosMPCPlanner:
             # CasADi reshape() consumes vectors in column-major order.
             p_mat[:N, dyn_A_off:dyn_A_off + dyn_A_np] = np.transpose(
                 np.asarray(dyn_A, dtype=float), (0, 2, 1)
-            ).reshape(N, 16)
+            ).reshape(N, nx * nx)
             p_mat[:N, dyn_B_off:dyn_B_off + dyn_B_np] = np.transpose(
                 np.asarray(dyn_B, dtype=float), (0, 2, 1)
-            ).reshape(N, 8)
-            p_mat[:N, dyn_F_off:dyn_F_off + dyn_F_np] = np.asarray(dyn_next_bar, dtype=float).reshape(N, 4)
+            ).reshape(N, nx * 2)
+            p_mat[:N, dyn_F_off:dyn_F_off + dyn_F_np] = np.asarray(dyn_next_bar, dtype=float).reshape(N, nx)
             # Terminal-stage p is not used by dynamics, but keep it finite and
             # deterministic for flat parameter I/O.
-            p_mat[N, dyn_A_off:dyn_A_off + dyn_A_np] = np.eye(4, dtype=float).reshape(-1, order="F")
+            p_mat[N, dyn_A_off:dyn_A_off + dyn_A_np] = np.eye(nx, dtype=float).reshape(-1, order="F")
             p_mat[N, dyn_B_off:dyn_B_off + dyn_B_np] = 0.0
             p_mat[N, dyn_F_off:dyn_F_off + dyn_F_np] = X_stage[N, :]
 
@@ -6612,8 +6700,13 @@ class AcadosMPCPlanner:
         self.last_feasible_candidates = []
 
         input_prep_t0 = time.perf_counter()
-        x0 = np.asarray(x0, dtype=float).reshape(4)
-        x0[3] = wrap_to_pi(float(x0[3]))
+        # x0 may be [px,py,v,yaw] (actual yaw rate from cfg.ego_yawrate0) or
+        # [px,py,v,yaw,yawrate].  ``x0`` keeps the four-state pose used by the
+        # planners/messages; ``x0_full`` is the five-state yaw-rate-lag solver
+        # initial condition.
+        x0_full = augment_ego_state(x0, cfg)
+        x0_full[3] = wrap_to_pi(float(x0_full[3]))
+        x0 = x0_full[:4].copy()
         goal = np.asarray(goal, dtype=float).reshape(2)
         original_goal_arr = np.asarray(original_goal if original_goal is not None else goal, dtype=float).reshape(2)
         order_i = int(order if order is not None else getattr(cfg, "ORDER", 1))
@@ -6726,7 +6819,7 @@ class AcadosMPCPlanner:
         # the previous cycle's X_bar/U_bar unless an explicit
         # /initial_guidance nominal was supplied by the ROS wrapper for this
         # exact recycle.
-        self.reset_cycle_nominal(x0, order_i)
+        self.reset_cycle_nominal(x0_full, order_i)
         U_bar = self.U_warm.copy()
         X_bar = self.X_warm.copy()
         flag = 0
@@ -6739,7 +6832,7 @@ class AcadosMPCPlanner:
         # by rolling U_bar out from x0; guidance states are retained only through
         # reference_states for the stage-wise tracking objective.
         external_nominal = self._coerce_initial_nominal(
-            x0, initial_U, initial_X, initial_dt, order_i
+            x0_full, initial_U, initial_X, initial_dt, order_i
         )
         if external_nominal is not None:
             U_bar, X_bar = external_nominal
@@ -6749,7 +6842,7 @@ class AcadosMPCPlanner:
         # so a solver failure publishes exactly that X_nom/U_nom rather than the
         # legacy hard-coded 3-way ORDER bias in _make_bias_control().
         explicit_fallback_nominal = self._coerce_initial_nominal(
-            x0, fallback_U, fallback_X, float(cfg.dt_init), order_i
+            x0_full, fallback_U, fallback_X, float(cfg.dt_init), order_i
         )
         if explicit_fallback_nominal is None:
             fallback_U_bar = np.asarray(U_bar, dtype=float).copy()
@@ -6853,7 +6946,7 @@ class AcadosMPCPlanner:
             print("# fallback #")
             print("###################")
             fallback = self._make_fallback_result(
-                x0, order_i, vertex_set_arr, halfspaces_arr,
+                x0_full, order_i, vertex_set_arr, halfspaces_arr,
                 dynamic_halfspace_mask=dyn_mask_arr, vertex_types=vertex_types_arr,
                 fallback_U_bar=fallback_U_bar, fallback_X_bar=fallback_X_bar,
             )
@@ -6937,7 +7030,7 @@ class AcadosMPCPlanner:
 
             warm_start_t0 = time.perf_counter()
             self._warm_start(X_bar, U_bar)
-            x0_solver = np.asarray(x0, dtype=float)
+            x0_solver = np.asarray(x0_full, dtype=float)
             self.solver.set(0, "lbx", x0_solver)
             self.solver.set(0, "ubx", x0_solver)
             iter_timing["warm_start"] = _acc_timing("warm_start", warm_start_t0)
@@ -7051,7 +7144,7 @@ class AcadosMPCPlanner:
                 # nominal input sequence, then use that rollout consistently for
                 # candidate evaluation, output, and the next SQP linearization.
                 rollout_t0 = time.perf_counter()
-                X_nl = rollout_ego(x0, result.U, float(cfg.dt_init), cfg)
+                X_nl = rollout_ego(x0_full, result.U, float(cfg.dt_init), cfg)
                 iter_timing["rollout"] = _acc_timing("rollout", rollout_t0)
                 dx_inf = float(np.max(np.abs(X_nl - X_bar[:4, :]))) if X_nl.size else 0.0
                 result.X = X_nl
@@ -7080,7 +7173,7 @@ class AcadosMPCPlanner:
                 U_bar = np.zeros((6, N), dtype=float)
                 U_bar[:2, :] = result.U
                 U_bar[2:6, :] = ss_result
-                X_bar = self._make_augmented_warm_start(x0, U_bar)
+                X_bar = self._make_augmented_warm_start(x0_full, U_bar)
                 iter_timing["warm_update"] = _acc_timing("warm_update", warm_update_t0)
                 iter_timing["total"] = (time.perf_counter() - iter_wall_t0) * 1000.0
                 iteration_timing_ms.append(iter_timing)

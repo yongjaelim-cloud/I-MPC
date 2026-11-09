@@ -34,6 +34,7 @@ extern "C" {
 #define casadi_s1 CASADI_PREFIX(s1)
 #define casadi_s2 CASADI_PREFIX(s2)
 #define casadi_s3 CASADI_PREFIX(s3)
+#define casadi_s4 CASADI_PREFIX(s4)
 
 /* Symbol visibility in DLLs */
 #ifndef CASADI_SYMBOL_EXPORT
@@ -50,67 +51,77 @@ extern "C" {
   #endif
 #endif
 
-static const casadi_int casadi_s0[3] = {4, 1, 1};
-static const casadi_int casadi_s1[3] = {0, 1, 1};
-static const casadi_int casadi_s2[3] = {32, 1, 1};
-static const casadi_int casadi_s3[3] = {2, 1, 1};
+static const casadi_int casadi_s0[3] = {5, 1, 1};
+static const casadi_int casadi_s1[3] = {4, 1, 1};
+static const casadi_int casadi_s2[3] = {0, 1, 1};
+static const casadi_int casadi_s3[3] = {35, 1, 1};
+static const casadi_int casadi_s4[3] = {2, 1, 1};
 
-/* switchable_mpc_proposed_phase0_ls_delta_dynamics_constr_h_fun:(i0[4],i1[4],i2[0],i3[32])->(o0[2]) */
+/* switchable_mpc_proposed_phase0_ls_delta_dynamics_constr_h_fun:(i0[5],i1[4],i2[0],i3[35])->(o0[2]) */
 static int casadi_f0(const casadi_real** arg, casadi_real** res, casadi_int* iw, casadi_real* w, int mem) {
-  casadi_real a0, a1, a2, a3, a4, a5, a6, a7, a8;
-  a0=arg[3]? arg[3][18] : 0;
-  a1=arg[3]? arg[3][19] : 0;
+  casadi_real a0, a1, a2, a3, a4, a5, a6, a7, a8, a9;
+  a0=arg[3]? arg[3][19] : 0;
+  a1=arg[3]? arg[3][20] : 0;
   a2=arg[0]? arg[0][0] : 0;
   a3=arg[3]? arg[3][6] : 0;
   a2=(a2-a3);
   a1=(a1*a2);
-  a3=arg[3]? arg[3][20] : 0;
+  a3=arg[3]? arg[3][21] : 0;
   a4=arg[0]? arg[0][1] : 0;
   a5=arg[3]? arg[3][7] : 0;
   a4=(a4-a5);
   a3=(a3*a4);
   a1=(a1+a3);
-  a3=arg[3]? arg[3][21] : 0;
+  a3=arg[3]? arg[3][22] : 0;
   a5=arg[0]? arg[0][2] : 0;
   a6=arg[3]? arg[3][8] : 0;
   a5=(a5-a6);
   a3=(a3*a5);
   a1=(a1+a3);
-  a3=arg[3]? arg[3][22] : 0;
+  a3=arg[3]? arg[3][23] : 0;
   a6=arg[0]? arg[0][3] : 0;
   a7=arg[3]? arg[3][9] : 0;
   a6=(a6-a7);
   a3=(a3*a6);
   a1=(a1+a3);
-  a3=arg[3]? arg[3][23] : 0;
-  a7=arg[1]? arg[1][0] : 0;
+  a3=arg[3]? arg[3][24] : 0;
+  a7=arg[0]? arg[0][4] : 0;
+  a8=arg[3]? arg[3][10] : 0;
+  a7=(a7-a8);
   a3=(a3*a7);
   a1=(a1+a3);
-  a3=arg[3]? arg[3][24] : 0;
-  a8=arg[1]? arg[1][1] : 0;
+  a3=arg[3]? arg[3][25] : 0;
+  a8=arg[1]? arg[1][0] : 0;
   a3=(a3*a8);
+  a1=(a1+a3);
+  a3=arg[3]? arg[3][26] : 0;
+  a9=arg[1]? arg[1][1] : 0;
+  a3=(a3*a9);
   a1=(a1+a3);
   a0=(a0+a1);
   a1=arg[1]? arg[1][2] : 0;
   a0=(a0-a1);
   if (res[0]!=0) res[0][0]=a0;
-  a0=arg[3]? arg[3][25] : 0;
-  a1=arg[3]? arg[3][26] : 0;
+  a0=arg[3]? arg[3][27] : 0;
+  a1=arg[3]? arg[3][28] : 0;
   a1=(a1*a2);
-  a2=arg[3]? arg[3][27] : 0;
+  a2=arg[3]? arg[3][29] : 0;
   a2=(a2*a4);
   a1=(a1+a2);
-  a2=arg[3]? arg[3][28] : 0;
+  a2=arg[3]? arg[3][30] : 0;
   a2=(a2*a5);
   a1=(a1+a2);
-  a2=arg[3]? arg[3][29] : 0;
+  a2=arg[3]? arg[3][31] : 0;
   a2=(a2*a6);
   a1=(a1+a2);
-  a2=arg[3]? arg[3][30] : 0;
+  a2=arg[3]? arg[3][32] : 0;
   a2=(a2*a7);
   a1=(a1+a2);
-  a2=arg[3]? arg[3][31] : 0;
+  a2=arg[3]? arg[3][33] : 0;
   a2=(a2*a8);
+  a1=(a1+a2);
+  a2=arg[3]? arg[3][34] : 0;
+  a2=(a2*a9);
   a1=(a1+a2);
   a0=(a0+a1);
   a1=arg[1]? arg[1][3] : 0;
@@ -177,16 +188,16 @@ CASADI_SYMBOL_EXPORT const char* switchable_mpc_proposed_phase0_ls_delta_dynamic
 CASADI_SYMBOL_EXPORT const casadi_int* switchable_mpc_proposed_phase0_ls_delta_dynamics_constr_h_fun_sparsity_in(casadi_int i) {
   switch (i) {
     case 0: return casadi_s0;
-    case 1: return casadi_s0;
-    case 2: return casadi_s1;
-    case 3: return casadi_s2;
+    case 1: return casadi_s1;
+    case 2: return casadi_s2;
+    case 3: return casadi_s3;
     default: return 0;
   }
 }
 
 CASADI_SYMBOL_EXPORT const casadi_int* switchable_mpc_proposed_phase0_ls_delta_dynamics_constr_h_fun_sparsity_out(casadi_int i) {
   switch (i) {
-    case 0: return casadi_s3;
+    case 0: return casadi_s4;
     default: return 0;
   }
 }

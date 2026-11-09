@@ -53,61 +53,68 @@ extern "C" {
   #endif
 #endif
 
-static const casadi_int casadi_s0[3] = {4, 1, 1};
+static const casadi_int casadi_s0[3] = {5, 1, 1};
 static const casadi_int casadi_s1[3] = {3, 1, 1};
 static const casadi_int casadi_s2[3] = {0, 1, 1};
-static const casadi_int casadi_s3[3] = {24, 1, 1};
+static const casadi_int casadi_s3[3] = {26, 1, 1};
 static const casadi_int casadi_s4[3] = {1, 1, 1};
-static const casadi_int casadi_s5[3] = {7, 1, 1};
+static const casadi_int casadi_s5[3] = {8, 1, 1};
 static const casadi_int casadi_s6[3] = {1, 0, 1};
 
-/* switchable_mpc_proposed_phase0_ls_delta_dynamics_avoidance_only_constr_h_fun_jac_uxt_zt:(i0[4],i1[3],i2[0],i3[24])->(o0,o1[7],o2[1x0]) */
+/* switchable_mpc_proposed_phase0_ls_delta_dynamics_avoidance_only_constr_h_fun_jac_uxt_zt:(i0[5],i1[3],i2[0],i3[26])->(o0,o1[8],o2[1x0]) */
 static int casadi_f0(const casadi_real** arg, casadi_real** res, casadi_int* iw, casadi_real* w, int mem) {
-  casadi_real a0, a1, a2, a3, a4, a5, a6, a7, a8;
-  a0=arg[3]? arg[3][17] : 0;
-  a1=arg[3]? arg[3][18] : 0;
+  casadi_real a0, a1, a2, a3, a4, a5, a6, a7, a8, a9;
+  a0=arg[3]? arg[3][18] : 0;
+  a1=arg[3]? arg[3][19] : 0;
   a2=arg[0]? arg[0][0] : 0;
   a3=arg[3]? arg[3][6] : 0;
   a2=(a2-a3);
   a2=(a1*a2);
-  a3=arg[3]? arg[3][19] : 0;
+  a3=arg[3]? arg[3][20] : 0;
   a4=arg[0]? arg[0][1] : 0;
   a5=arg[3]? arg[3][7] : 0;
   a4=(a4-a5);
   a4=(a3*a4);
   a2=(a2+a4);
-  a4=arg[3]? arg[3][20] : 0;
+  a4=arg[3]? arg[3][21] : 0;
   a5=arg[0]? arg[0][2] : 0;
   a6=arg[3]? arg[3][8] : 0;
   a5=(a5-a6);
   a5=(a4*a5);
   a2=(a2+a5);
-  a5=arg[3]? arg[3][21] : 0;
+  a5=arg[3]? arg[3][22] : 0;
   a6=arg[0]? arg[0][3] : 0;
   a7=arg[3]? arg[3][9] : 0;
   a6=(a6-a7);
   a6=(a5*a6);
   a2=(a2+a6);
-  a6=arg[3]? arg[3][22] : 0;
-  a7=arg[1]? arg[1][0] : 0;
+  a6=arg[3]? arg[3][23] : 0;
+  a7=arg[0]? arg[0][4] : 0;
+  a8=arg[3]? arg[3][10] : 0;
+  a7=(a7-a8);
   a7=(a6*a7);
   a2=(a2+a7);
-  a7=arg[3]? arg[3][23] : 0;
-  a8=arg[1]? arg[1][1] : 0;
+  a7=arg[3]? arg[3][24] : 0;
+  a8=arg[1]? arg[1][0] : 0;
   a8=(a7*a8);
   a2=(a2+a8);
+  a8=arg[3]? arg[3][25] : 0;
+  a9=arg[1]? arg[1][1] : 0;
+  a9=(a8*a9);
+  a2=(a2+a9);
   a0=(a0+a2);
   a2=arg[1]? arg[1][2] : 0;
   a0=(a0-a2);
   if (res[0]!=0) res[0][0]=a0;
-  if (res[1]!=0) res[1][0]=a6;
-  if (res[1]!=0) res[1][1]=a7;
-  a7=-1.;
-  if (res[1]!=0) res[1][2]=a7;
+  if (res[1]!=0) res[1][0]=a7;
+  if (res[1]!=0) res[1][1]=a8;
+  a8=-1.;
+  if (res[1]!=0) res[1][2]=a8;
   if (res[1]!=0) res[1][3]=a1;
   if (res[1]!=0) res[1][4]=a3;
   if (res[1]!=0) res[1][5]=a4;
   if (res[1]!=0) res[1][6]=a5;
+  if (res[1]!=0) res[1][7]=a6;
   return 0;
 }
 

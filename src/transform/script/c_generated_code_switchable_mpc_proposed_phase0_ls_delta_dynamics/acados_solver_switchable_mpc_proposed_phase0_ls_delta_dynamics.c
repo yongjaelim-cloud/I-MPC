@@ -388,19 +388,19 @@ void switchable_mpc_proposed_phase0_ls_delta_dynamics_acados_create_set_default_
     const int N = capsule->nlp_solver_plan->N;
     // initialize parameters to nominal value
     double* p = calloc(NP, sizeof(double));
-    p[0] = 0.7071067811865475;
-    p[1] = 0.7071067811865475;
-    p[2] = -0.7071067811865475;
-    p[3] = 0.7071067811865475;
-    p[5] = 1;
+    p[0] = -0.7071067811865475;
+    p[1] = -0.7071067811865475;
+    p[2] = 0.7071067811865475;
+    p[3] = -0.7071067811865475;
+    p[5] = -1;
     p[6] = -5;
     p[7] = -5;
     p[9] = 0.785;
-    p[14] = -5;
     p[15] = -5;
-    p[17] = 0.785;
-    p[18] = -1000000000000000;
-    p[25] = -1000000000000000;
+    p[16] = -5;
+    p[18] = 0.785;
+    p[19] = -1000000000000000;
+    p[27] = -1000000000000000;
 
     for (int i = 0; i <= N; i++) {
         switchable_mpc_proposed_phase0_ls_delta_dynamics_acados_update_params(capsule, i, p, NP);
@@ -466,11 +466,6 @@ void switchable_mpc_proposed_phase0_ls_delta_dynamics_acados_setup_nlp_in(switch
         cost_scaling[13] = 1;
         cost_scaling[14] = 1;
         cost_scaling[15] = 1;
-        cost_scaling[16] = 1;
-        cost_scaling[17] = 1;
-        cost_scaling[18] = 1;
-        cost_scaling[19] = 1;
-        cost_scaling[20] = 1;
         for (int i = 0; i <= N; i++)
         {
             ocp_nlp_cost_model_set(nlp_config, nlp_dims, nlp_in, i, "scaling", &cost_scaling[i]);
@@ -500,6 +495,7 @@ void switchable_mpc_proposed_phase0_ls_delta_dynamics_acados_setup_nlp_in(switch
     // change only the non-zero elements:
     W_0[0+(NY0) * 0] = 1;
     W_0[1+(NY0) * 1] = 1;
+    W_0[2+(NY0) * 2] = 1;
     W_0[3+(NY0) * 3] = 1;
     W_0[4+(NY0) * 4] = 2;
     W_0[6+(NY0) * 6] = 1000000;
@@ -534,6 +530,7 @@ void switchable_mpc_proposed_phase0_ls_delta_dynamics_acados_setup_nlp_in(switch
     // change only the non-zero elements:
     W[0+(NY) * 0] = 1;
     W[1+(NY) * 1] = 1;
+    W[2+(NY) * 2] = 1;
     W[3+(NY) * 3] = 1;
     W[4+(NY) * 4] = 2;
     W[6+(NY) * 6] = 1000000;
@@ -578,6 +575,7 @@ void switchable_mpc_proposed_phase0_ls_delta_dynamics_acados_setup_nlp_in(switch
     // change only the non-zero elements:
     W_e[0+(NYN) * 0] = 1;
     W_e[1+(NYN) * 1] = 1;
+    W_e[2+(NYN) * 2] = 1;
     W_e[3+(NYN) * 3] = 1;
     ocp_nlp_cost_model_set(nlp_config, nlp_dims, nlp_in, N, "W", W_e);
     free(W_e);
@@ -605,6 +603,7 @@ void switchable_mpc_proposed_phase0_ls_delta_dynamics_acados_setup_nlp_in(switch
     idxbx0[1] = 1;
     idxbx0[2] = 2;
     idxbx0[3] = 3;
+    idxbx0[4] = 4;
 
     double* lubx0 = calloc(2*NBX0, sizeof(double));
     double* lbx0 = lubx0;
@@ -644,8 +643,8 @@ void switchable_mpc_proposed_phase0_ls_delta_dynamics_acados_setup_nlp_in(switch
     double* lubu = calloc(2*NBU, sizeof(double));
     double* lbu = lubu;
     double* ubu = lubu + NBU;
-    lbu[0] = -1.3;
-    ubu[0] = 1.3;
+    lbu[0] = -1.5;
+    ubu[0] = 1.5;
     lbu[1] = -1;
     ubu[1] = 1;
     ubu[2] = 1000000;
@@ -674,7 +673,7 @@ void switchable_mpc_proposed_phase0_ls_delta_dynamics_acados_setup_nlp_in(switch
     double* lbx = lubx;
     double* ubx = lubx + NBX;
     lbx[0] = -0.01;
-    ubx[0] = 1;
+    ubx[0] = 0.8;
 
     for (int i = 1; i < N; i++)
     {
@@ -727,7 +726,7 @@ void switchable_mpc_proposed_phase0_ls_delta_dynamics_acados_setup_nlp_in(switch
     double* lbx_e = lubx_e;
     double* ubx_e = lubx_e + NBXN;
     lbx_e[0] = -0.01;
-    ubx_e[0] = 1;
+    ubx_e[0] = 0.8;
     ocp_nlp_constraints_model_set(nlp_config, nlp_dims, nlp_in, nlp_out, N, "idxbx", idxbx_e);
     ocp_nlp_constraints_model_set(nlp_config, nlp_dims, nlp_in, nlp_out, N, "lbx", lbx_e);
     ocp_nlp_constraints_model_set(nlp_config, nlp_dims, nlp_in, nlp_out, N, "ubx", ubx_e);
@@ -792,7 +791,7 @@ static void switchable_mpc_proposed_phase0_ls_delta_dynamics_acados_create_set_o
     ocp_nlp_solver_opts_set(nlp_config, nlp_opts, "levenberg_marquardt", &levenberg_marquardt);
 
     /* options QP solver */
-    int qp_solver_cond_N;const int qp_solver_cond_N_ori = 20;
+    int qp_solver_cond_N;const int qp_solver_cond_N_ori = 15;
     qp_solver_cond_N = N < qp_solver_cond_N_ori ? N : qp_solver_cond_N_ori; // use the minimum value here
     ocp_nlp_solver_opts_set(nlp_config, nlp_opts, "qp_cond_N", &qp_solver_cond_N);
 
@@ -1022,7 +1021,7 @@ int switchable_mpc_proposed_phase0_ls_delta_dynamics_acados_update_params(switch
 {
     int solver_status = 0;
 
-    int casadi_np = 32;
+    int casadi_np = 35;
     if (casadi_np != np) {
         printf("acados_update_params: trying to set %i parameters for external functions."
             " External function has %i parameters. Exiting.\n", np, casadi_np);

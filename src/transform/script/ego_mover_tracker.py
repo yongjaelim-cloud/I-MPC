@@ -1215,7 +1215,7 @@ class EgoMoverNode:
             if not hasattr(self, "commanded_v"):
                 self.commanded_v = float(self.ego_v)
         v_min = float(getattr(self.cfg, "v_min", 0.0))
-        v_max = float(getattr(self.cfg, "v_max", getattr(self.cfg, "V_max", 0.6)))
+        v_max = 0.8 #float(getattr(self.cfg, "v_max", getattr(self.cfg, "V_max", 0.6)))
         yawrate_min = float(getattr(self.cfg, "yawrate_min", -1.0))
         yawrate_max = float(getattr(self.cfg, "yawrate_max", 1.0))
         interval_s = min(max(float(interval_s), 0.0), 0.1)

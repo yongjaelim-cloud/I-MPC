@@ -14,6 +14,7 @@ Important convention:
 import random
 import os
 import threading
+import time
 
 import numpy as np
 import rospy
@@ -1086,6 +1087,104 @@ class Frenet2CartesianTransformer:
         )
         # Backward-compatible alias for older helper code.
         self.mpc_pred_trajs_pub = self.mpc_pred_traj_pubs
+
+        # Parseh hierarchical planner visualization is separate from I-MPC.
+        # The final topic is the output of MPC_parseh_selector, not any one
+        # MPC_parseh{0..3} candidate. Draw the transmitted optimized states
+        # (xs/ys/vs/yaws) directly, without reanchoring them to the latest ego.
+        self.parseh_final_control_topic = str(rospy.get_param(
+            "~parseh_final_control_topic", "/mpc_parseh_control_seq"))
+        self.parseh_final_marker_topic = str(rospy.get_param(
+            "~parseh_final_marker_topic", "/mpc_parseh_final_traj"))
+        self.parseh_candidates_marker_topic = str(rospy.get_param(
+            "~parseh_candidates_marker_topic", "/mpc_parseh_pred_trajs"))
+        self.parseh_show_candidates = _as_bool(rospy.get_param(
+            "~parseh_show_candidates", True), True)
+        self.parseh_final_line_width = max(0.001, float(rospy.get_param(
+            "~parseh_final_line_width", 0.18)))
+        self.parseh_candidate_line_width = max(0.001, float(rospy.get_param(
+            "~parseh_candidate_line_width", 0.085)))
+        self.parseh_marker_lifetime_s = max(0.15, float(rospy.get_param(
+            "~parseh_marker_lifetime_s", 0.75)))
+        self.parseh_candidate_max_age_s = max(0.1, float(rospy.get_param(
+            "~parseh_candidate_max_age_s", self.parseh_marker_lifetime_s)))
+        self.parseh_avoidance_color = _rgba(
+            rospy.get_param("~parseh_avoidance_color", [0.12, 0.92, 0.38, 1.0]),
+            (0.12, 0.92, 0.38, 1.0))
+        self.parseh_mitigation_color = (1.0, 0.0, 0.0, 1.0)
+        # These caches are flushed by the existing fast-marker loop at 20 Hz.
+        self._parseh_final_marker = None
+        self._parseh_final_dirty = False
+        self._parseh_candidate_markers = {}
+        self._parseh_candidates_dirty = False
+        self.parseh_final_marker_pub = rospy.Publisher(
+            self.parseh_final_marker_topic, Marker, queue_size=1, tcp_nodelay=True)
+        self.parseh_candidates_marker_pub = rospy.Publisher(
+            self.parseh_candidates_marker_topic, MarkerArray, queue_size=1, tcp_nodelay=True)
+        self.parseh_final_control_sub = rospy.Subscriber(
+            self.parseh_final_control_topic, MPCControlSeq,
+            self.parseh_final_control_callback, queue_size=1, tcp_nodelay=True)
+        self.parseh_candidate_control_subs = []
+        if self.parseh_show_candidates:
+            for parseh_idx in range(4):
+                parseh_topic = str(rospy.get_param(
+                    "~parseh_control_seq%d" % parseh_idx,
+                    "/mpc_parseh_control_seq%d" % parseh_idx))
+                self.parseh_candidate_control_subs.append(rospy.Subscriber(
+                    parseh_topic, MPCControlSeq,
+                    self.parseh_candidate_control_callback,
+                    callback_args=parseh_idx, queue_size=1, tcp_nodelay=True))
+        rospy.loginfo("[plotter] Parseh final %s -> %s; candidates -> %s (enabled=%s)",
+                      self.parseh_final_control_topic, self.parseh_final_marker_topic,
+                      self.parseh_candidates_marker_topic, str(self.parseh_show_candidates))
+
+        # RCMS hierarchical planner visualization (independent of Parseh/I-MPC).
+        self.rcms_final_control_topic = str(rospy.get_param(
+            "~rcms_final_control_topic", "/mpc_rcms_control_seq"))
+        self.rcms_final_marker_topic = str(rospy.get_param(
+            "~rcms_final_marker_topic", "/mpc_rcms_final_traj"))
+        self.rcms_candidates_marker_topic = str(rospy.get_param(
+            "~rcms_candidates_marker_topic", "/mpc_rcms_pred_trajs"))
+        self.rcms_show_candidates = _as_bool(rospy.get_param(
+            "~rcms_show_candidates", True), True)
+        self.rcms_final_line_width = max(0.001, float(rospy.get_param(
+            "~rcms_final_line_width", 0.20)))
+        self.rcms_candidate_line_width = max(0.001, float(rospy.get_param(
+            "~rcms_candidate_line_width", 0.085)))
+        self.rcms_marker_lifetime_s = max(0.1, float(rospy.get_param(
+            "~rcms_marker_lifetime_s", 0.75)))
+        self.rcms_candidate_max_age_s = max(0.1, float(rospy.get_param(
+            "~rcms_candidate_max_age_s", 0.25)))
+        self.rcms_avoidance_color = _rgba(rospy.get_param(
+            "~rcms_avoidance_color", [0.1, 0.95, 0.35, 1.0]),
+            (0.1, 0.95, 0.35, 1.0))
+        self.rcms_mitigation_color = _rgba(rospy.get_param(
+            "~rcms_mitigation_color", [1.0, 0.25, 0.08, 1.0]),
+            (1.0, 0.25, 0.08, 1.0))
+        self._rcms_final_marker = None
+        self._rcms_final_dirty = False
+        self._rcms_candidate_markers = {}
+        self._rcms_candidates_dirty = False
+        self.rcms_final_marker_pub = rospy.Publisher(
+            self.rcms_final_marker_topic, Marker, queue_size=1, tcp_nodelay=True)
+        self.rcms_candidates_marker_pub = rospy.Publisher(
+            self.rcms_candidates_marker_topic, MarkerArray, queue_size=1, tcp_nodelay=True)
+        self.rcms_final_control_sub = rospy.Subscriber(
+            self.rcms_final_control_topic, MPCControlSeq,
+            self.rcms_final_control_callback, queue_size=1, tcp_nodelay=True)
+        self.rcms_candidate_control_subs = []
+        if self.rcms_show_candidates:
+            for rcms_idx in range(4):
+                rcms_topic = str(rospy.get_param(
+                    "~rcms_control_seq%d" % rcms_idx,
+                    "/mpc_rcms_control_seq%d" % rcms_idx))
+                self.rcms_candidate_control_subs.append(rospy.Subscriber(
+                    rcms_topic, MPCControlSeq,
+                    self.rcms_candidate_control_callback,
+                    callback_args=rcms_idx, queue_size=1, tcp_nodelay=True))
+        rospy.loginfo("[plotter] RCMS final %s -> %s; candidates -> %s (enabled=%s)",
+                      self.rcms_final_control_topic, self.rcms_final_marker_topic,
+                      self.rcms_candidates_marker_topic, str(self.rcms_show_candidates))
 
         # Fast marker arrays are also flushed by the common fixed-rate
         # publication loop.  Do not run a separate timer, otherwise these
@@ -2698,6 +2797,143 @@ class Frenet2CartesianTransformer:
             planner_cache[int(trajectory_type)] = (order_key, marker)
             self.mpc_pred_markers_dirty = True
 
+    @staticmethod
+    def _parseh_mode_from_msg(msg):
+        try:
+            mode_id = int(getattr(msg, "trajectory_type", -1))
+        except (TypeError, ValueError):
+            mode_id = -1
+        # Selector mitigation uses type 3; it can inherit an older stage label.
+        if mode_id == 3:
+            return "MITIGATION"
+        stage = str(getattr(msg, "trajectory_stage", "")).strip().lower()
+        if stage == "parseh_avoidance":
+            return "AVOIDANCE"
+        if stage == "parseh_mitigation":
+            return "MITIGATION"
+        return {1: "AVOIDANCE", 2: "MITIGATION"}.get(mode_id, "UNKNOWN")
+
+    def _parseh_control_marker(self, msg, marker_id, final=False):
+        # The original planner publishes the exact rollout of its optimized
+        # control sequence in xs/ys/vs/yaws, with x/y in map and z=time.
+        # Do NOT reconstruct from a later /tracked_pose snapshot: that would
+        # draw a different trajectory, especially after fast replanning.
+        result = self._optimized_mpc_control_seq_outputs(msg)
+        if result is None or len(result[1]) < 2:
+            rospy.logwarn_throttle(3.0,
+                "[plotter] Parseh MPCControlSeq missing valid xs/ys/vs/yaws; cannot draw exact trajectory")
+            return None
+        _, points = result
+        mode = self._parseh_mode_from_msg(msg)
+        marker = Marker()
+        marker.header.frame_id = "map"
+        marker.header.stamp = rospy.Time.now()
+        marker.ns = "parseh_final" if final else "parseh_candidates"
+        marker.id = int(marker_id)
+        marker.type = Marker.LINE_STRIP
+        marker.action = Marker.ADD
+        marker.pose.orientation.w = 1.0
+        marker.scale.x = (self.parseh_final_line_width if final
+                          else self.parseh_candidate_line_width)
+        if mode == "MITIGATION":
+            # Fixed pure red for both final and candidate mitigation paths.
+            rgba = (1.0, 0.0, 0.0, 1.0)
+        elif final:
+            rgba = (self.parseh_avoidance_color if mode == "AVOIDANCE"
+                    else (0.95, 0.95, 0.95, 1.0))
+        else:
+            cool = [(0.12, 0.95, 0.40, 0.85), (0.15, 0.78, 1.0, 0.85),
+                    (0.56, 0.92, 0.40, 0.85), (0.38, 0.75, 0.96, 0.85)]
+            rgba = cool[int(marker_id) % 4]
+        self.set_color(marker, rgba)
+        marker.points = points
+        marker.lifetime = rospy.Duration(self.parseh_marker_lifetime_s)
+        return marker
+
+    def parseh_final_control_callback(self, msg):
+        marker = self._parseh_control_marker(msg, marker_id=0, final=True)
+        if marker is None:
+            return
+        with self.fast_marker_lock:
+            self._parseh_final_marker = marker
+            self._parseh_final_dirty = True
+
+    def parseh_candidate_control_callback(self, msg, planner_idx):
+        if not self.parseh_show_candidates:
+            return
+        marker = self._parseh_control_marker(msg, marker_id=planner_idx, final=False)
+        if marker is None:
+            return
+        with self.fast_marker_lock:
+            self._parseh_candidate_markers[int(planner_idx)] = (time.monotonic(), marker)
+            self._parseh_candidates_dirty = True
+
+    @staticmethod
+    def _rcms_mode_from_msg(msg):
+        stage = str(getattr(msg, "trajectory_stage", "")).lower()
+        if stage == "rcms_avoidance":
+            return "AVOIDANCE"
+        if stage == "rcms_mitigation":
+            return "MITIGATION"
+        try:
+            kind = int(getattr(msg, "trajectory_type", -1))
+        except (TypeError, ValueError):
+            kind = -1
+        return {1: "AVOIDANCE", 2: "MITIGATION"}.get(kind, "UNKNOWN")
+
+    def _rcms_control_marker(self, msg, marker_id, final=False):
+        # Plot the exact published optimized trajectory in map coordinates.
+        # Never re-integrate it from the latest /tracked_pose.
+        result = self._optimized_mpc_control_seq_outputs(msg)
+        if result is None or len(result[1]) < 2:
+            rospy.logwarn_throttle(3.0,
+                "[plotter] RCMS control sequence has no valid xs/ys/vs/yaws")
+            return None
+        _, points = result
+        mode = self._rcms_mode_from_msg(msg)
+        marker = Marker()
+        marker.header.frame_id = "map"
+        marker.header.stamp = rospy.Time.now()
+        marker.ns = "rcms_final" if final else "rcms_candidates"
+        marker.id = int(marker_id)
+        marker.type = Marker.LINE_STRIP
+        marker.action = Marker.ADD
+        marker.pose.orientation.w = 1.0
+        marker.scale.x = (self.rcms_final_line_width if final
+                          else self.rcms_candidate_line_width)
+        if final:
+            rgba = (self.rcms_mitigation_color if mode == "MITIGATION"
+                    else self.rcms_avoidance_color if mode == "AVOIDANCE"
+                    else (0.95, 0.95, 0.95, 1.0))
+        else:
+            warm = [(1.0, 0.23, 0.15, 0.85), (1.0, 0.5, 0.1, 0.85),
+                    (0.94, 0.18, 0.5, 0.85), (1.0, 0.65, 0.17, 0.85)]
+            cool = [(0.13, 0.98, 0.40, 0.85), (0.12, 0.7, 1.0, 0.85),
+                    (0.58, 0.95, 0.38, 0.85), (0.42, 0.7, 0.98, 0.85)]
+            rgba = (warm if mode == "MITIGATION" else cool)[int(marker_id) % 4]
+        self.set_color(marker, rgba)
+        marker.points = points
+        marker.lifetime = rospy.Duration(self.rcms_marker_lifetime_s)
+        return marker
+
+    def rcms_final_control_callback(self, msg):
+        marker = self._rcms_control_marker(msg, marker_id=0, final=True)
+        if marker is None:
+            return
+        with self.fast_marker_lock:
+            self._rcms_final_marker = marker
+            self._rcms_final_dirty = True
+
+    def rcms_candidate_control_callback(self, msg, planner_idx):
+        if not self.rcms_show_candidates:
+            return
+        marker = self._rcms_control_marker(msg, marker_id=planner_idx, final=False)
+        if marker is None:
+            return
+        with self.fast_marker_lock:
+            self._rcms_candidate_markers[int(planner_idx)] = (time.monotonic(), marker)
+            self._rcms_candidates_dirty = True
+
     def flush_fast_marker_arrays(self, _event=None, force=False):
         """Publish cached planner marker groups.
 
@@ -2712,8 +2948,68 @@ class Frenet2CartesianTransformer:
             mpc_markers = self._select_mpc_pred_markers_locked() if publish_mpc else []
 
             self.mpc_pred_markers_dirty = False
+            # Copy references under the lock; ROS publishing is done outside
+            # the callback lock to avoid blocking incoming planner messages.
+            parseh_final = self._parseh_final_marker if self._parseh_final_dirty else None
+            self._parseh_final_dirty = False
+            parseh_candidates_changed = bool(self._parseh_candidates_dirty)
+            parseh_candidates = []
+            if parseh_candidates_changed:
+                cutoff = time.monotonic() - float(self.parseh_candidate_max_age_s)
+                self._parseh_candidate_markers = {
+                    i: entry for i, entry in self._parseh_candidate_markers.items()
+                    if entry[0] >= cutoff
+                }
+                parseh_candidates = [self._parseh_candidate_markers[i][1]
+                                    for i in sorted(self._parseh_candidate_markers)]
+            self._parseh_candidates_dirty = False
+            rcms_final = self._rcms_final_marker if self._rcms_final_dirty else None
+            self._rcms_final_dirty = False
+            rcms_cutoff = time.monotonic() - self.rcms_candidate_max_age_s
+            stale_rcms = any(entry[0] < rcms_cutoff
+                             for entry in self._rcms_candidate_markers.values())
+            rcms_candidates_changed = bool(self._rcms_candidates_dirty or stale_rcms)
+            rcms_candidates = []
+            if rcms_candidates_changed:
+                self._rcms_candidate_markers = {
+                    i: entry for i, entry in self._rcms_candidate_markers.items()
+                    if entry[0] >= rcms_cutoff
+                }
+                rcms_candidates = [self._rcms_candidate_markers[i][1]
+                                   for i in sorted(self._rcms_candidate_markers)]
+            self._rcms_candidates_dirty = False
 
         stamp = rospy.Time.now()
+        if parseh_final is not None:
+            parseh_final.header.stamp = stamp
+            self.parseh_final_marker_pub.publish(parseh_final)
+        if parseh_candidates_changed:
+            parseh_arr = MarkerArray()
+            clear = Marker()
+            clear.header.frame_id = "map"
+            clear.header.stamp = stamp
+            clear.action = Marker.DELETEALL
+            parseh_arr.markers.append(clear)
+            for marker in parseh_candidates:
+                marker.header.stamp = stamp
+                parseh_arr.markers.append(marker)
+            self.parseh_candidates_marker_pub.publish(parseh_arr)
+
+        if rcms_final is not None:
+            rcms_final.header.stamp = stamp
+            self.rcms_final_marker_pub.publish(rcms_final)
+        if rcms_candidates_changed:
+            rcms_arr = MarkerArray()
+            clear = Marker()
+            clear.header.frame_id = "map"
+            clear.header.stamp = stamp
+            clear.action = Marker.DELETEALL
+            rcms_arr.markers.append(clear)
+            for marker in rcms_candidates:
+                marker.header.stamp = stamp
+                rcms_arr.markers.append(marker)
+            self.rcms_candidates_marker_pub.publish(rcms_arr)
+
         if publish_mpc:
             # Rebuild /mpc_pred_trajs from a clean RViz marker state every flush.
             # DELETEALL is inserted first so any trajectory left from the previous

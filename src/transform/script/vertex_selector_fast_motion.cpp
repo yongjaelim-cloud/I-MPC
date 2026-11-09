@@ -7,6 +7,8 @@
 #include <limits>
 #include <numeric>
 #include <vector>
+#include <unordered_map>
+#include <queue>
 
 namespace {
 
@@ -102,6 +104,18 @@ bool ear_clip(std::vector<Vec2> p, std::vector<std::vector<Vec2>>& parts){
     return true;
 }
 
+std::vector<Vec2> convex_hull_points(std::vector<Vec2> p){
+    p=dedupe(p,1e-10);
+    std::sort(p.begin(),p.end(),[](const Vec2&a,const Vec2&b){return a.x<b.x||(a.x==b.x&&a.y<b.y);});
+    p.erase(std::unique(p.begin(),p.end(),[](const Vec2&a,const Vec2&b){return norm2(a-b)<1e-20;}),p.end());
+    if(p.size()<3) return {};
+    std::vector<Vec2> h(2*p.size()); size_t k=0;
+    for(size_t i=0;i<p.size();++i){while(k>=2&&cross(h[k-1]-h[k-2],p[i]-h[k-2])<=1e-12)--k;h[k++]=p[i];}
+    for(size_t i=p.size()-1,t=k+1;i-->0;){while(k>=t&&cross(h[k-1]-h[k-2],p[i]-h[k-2])<=1e-12)--k;h[k++]=p[i];}
+    h.resize(k>0?k-1:0);
+    return (h.size()>=3&&std::abs(polygon_area(h))>1e-10)?h:std::vector<Vec2>{};
+}
+
 inline double distance_point_segment(Vec2 p,Vec2 a,Vec2 b){
     Vec2 e=b-a; double d=norm2(e); if(d<=EPS) return norm(p-a);
     double t=std::clamp(dot(p-a,e)/d,0.0,1.0); return norm(p-(a+e*t));
@@ -110,6 +124,45 @@ inline double distance_point_segment(Vec2 p,Vec2 a,Vec2 b){
 bool line_intersection(Vec2 p1,Vec2 d1,Vec2 p2,Vec2 d2,Vec2& out){
     double den=cross(d1,d2); if(std::abs(den)<=1e-10) return false;
     double t=cross(p2-p1,d2)/den; out=p1+d1*t; return std::isfinite(out.x)&&std::isfinite(out.y);
+}
+
+// Reduce a convex hull to <= 9 vertices by removing the least-cost supporting
+// edge. Every replacement intersection is checked against the original hull.
+// Greedy conservative polygon simplification: replace two adjacent vertices
+// with the intersection of their neighbouring supporting edge lines.
+std::vector<Vec2> cap_convex_outer(std::vector<Vec2> h,size_t limit=9){
+    if(h.size()<=limit) return h;
+    while(h.size()>limit){
+        int n=(int)h.size(), best_i=-1;Vec2 best_q{};
+        double best_cost=std::numeric_limits<double>::infinity();
+        for(int i=0;i<n;++i){
+            int a=(i+n-1)%n, b=i, c=(i+1)%n, d=(i+2)%n;
+            Vec2 q;
+            if(!line_intersection(h[a],h[b]-h[a],h[c],h[d]-h[c],q))continue;
+            if(norm(q-h[b])>1.0 || norm(q-h[c])>1.0)continue;
+            // polygon ... a, q, d ...; both b and c replaced by q.
+            double added=std::abs(cross(h[b]-h[a],q-h[a]))*0.5+
+                         std::abs(cross(h[d]-h[c],q-h[c]))*0.5;
+            if(added<best_cost){best_cost=added;best_i=i;best_q=q;}
+        }
+        if(best_i<0){
+            double minx=h[0].x,maxx=minx,miny=h[0].y,maxy=miny;
+            for(auto v:h){minx=std::min(minx,v.x);maxx=std::max(maxx,v.x);miny=std::min(miny,v.y);maxy=std::max(maxy,v.y);}
+            return {{minx,miny},{maxx,miny},{maxx,maxy},{minx,maxy}};
+        }
+        int n0=(int)h.size();std::vector<Vec2> candidate;
+        for(int k=0;k<n0;++k){
+            if(k==(best_i+1)%n0)continue;
+            candidate.push_back(k==best_i?best_q:h[k]);
+        }
+        if(candidate.size()<3||!is_convex(candidate)){
+            double minx=h[0].x,maxx=minx,miny=h[0].y,maxy=miny;
+            for(auto v:h){minx=std::min(minx,v.x);maxx=std::max(maxx,v.x);miny=std::min(miny,v.y);maxy=std::max(maxy,v.y);}
+            return {{minx,miny},{maxx,miny},{maxx,maxy},{minx,maxy}};
+        }
+        h=std::move(candidate);
+    }
+    return h;
 }
 
 Segment fit_tls(const std::vector<Vec2>& pts, bool& ok, Vec2 ego){
@@ -143,51 +196,50 @@ void split_fit_rec(const std::vector<Vec2>& P,int depth,int min_pts,double max_e
     bool ok=false; Segment f=fit_tls(P,ok,ego); if(ok && norm(f.end-f.start)>=min_len) out.push_back(f);
 }
 
-// Split-and-fit followed by a merge of adjacent nearly collinear pieces.
-// Split-and-merge on the max residual alone over-segments a straight but
-// noisy surface (a few 2-3 sigma range outliers trigger splits), producing
-// short segments with noisy directions and fake vertices that jitter from
-// frame to frame.  Merge adjacent pieces when the joint TLS fit is consistent
-// with the range noise (rms test, not max test) and the directions agree.
+// Prefer a piecewise-linear fit to retain corners of convex obstacles.
+// A single TLS line is a fallback for degenerate/noisy geometries only.
 void fit_segments(const std::vector<Vec2>& P,int min_pts,double max_error,double min_len,Vec2 ego,std::vector<Segment>& out){
-    std::vector<Segment> raw;
-    split_fit_rec(P,0,min_pts,max_error,min_len,ego,raw);
-    if(raw.size()<2){ out.insert(out.end(),raw.begin(),raw.end()); return; }
-    const double cos_merge=std::cos(12.0*M_PI/180.0);
-    std::vector<Segment> merged; merged.push_back(raw.front());
-    for(size_t i=1;i<raw.size();++i){
-        Segment& a=merged.back(); const Segment& b=raw[i];
-        bool tried=false;
-        // Direction of a short piece (few noisy points) is unreliable, so the
-        // angle test is applied only when both pieces are long; the joint-fit
-        // residual test below decides in every case.
-        const double la=norm(a.end-a.start), lb=norm(b.end-b.start);
-        const bool short_piece=std::min(la,lb)<0.3;
-        if(short_piece || std::abs(dot(a.direction,b.direction))>=cos_merge){
-            Vec2 chord=b.end-a.start; double L=norm(chord);
-            if(L>EPS){
-                Vec2 d=chord/L, n{-d.y,d.x};
-                std::vector<Vec2> pts;
-                for(const auto&p:P){
-                    double u=dot(p-a.start,d);
-                    if(u<-max_error||u>L+max_error) continue;
-                    if(std::abs(dot(p-a.start,n))>4.0*max_error) continue;
-                    pts.push_back(p);
-                }
-                if(pts.size()>=2){
-                    bool ok=false; Segment f=fit_tls(pts,ok,ego);
-                    // Noise-adaptive: merging must not make the fit clearly worse
-                    // than the pieces themselves (a real corner fails this by far).
-                    double piece_rms=std::max(a.rms_error,b.rms_error);
-                    double rms_ok=std::max(0.6*max_error,1.3*piece_rms);
-                    double max_ok=std::max(2.5*max_error,4.0*f.rms_error);
-                    if(ok && f.rms_error<=rms_ok && f.max_error<=max_ok){ a=f; tried=true; }
-                }
-            }
-        }
-        if(!tried) merged.push_back(b);
+    out.clear();
+    if((int)P.size()<std::max(2,min_pts)) return;
+    std::vector<Segment> trial;
+    split_fit_rec(P,0,min_pts,std::max(max_error,1e-4),min_len,ego,trial);
+    bool valid=!trial.empty() && trial.size()<=8;
+    for(const auto& s:trial){
+        if(!std::isfinite(s.max_error) || s.max_error>2.0*std::max(max_error,1e-4)) valid=false;
     }
-    out.insert(out.end(),merged.begin(),merged.end());
+    if(valid){out=std::move(trial);return;}
+    bool ok=false; Segment f=fit_tls(P,ok,ego);
+    if(ok && norm(f.end-f.start)>=min_len) out.push_back(f);
+}
+
+// A multi-line geometry is unreliable when corners require large extrapolation,
+// the observed chain folds back on itself, or consecutive turns reverse sign.
+// In such cases use the single-line fallback, NOT an invented corner.
+bool fit_geometry_collapsed(const std::vector<Segment>& segs,const std::vector<Vec2>& V,double ext){
+    if(segs.size()<=1) return false;
+    if(V.size()!=segs.size()+1) return true;
+    int turn_sign=0;
+    for(size_t i=0;i+1<segs.size();++i){
+        const Vec2 q=V[i+1];
+        if(std::max(norm(q-segs[i].end),norm(q-segs[i+1].start))>std::max(ext,0.05)) return true;
+        double c=cross(segs[i].direction,segs[i+1].direction);
+        if(dot(segs[i].direction,segs[i+1].direction)<-0.2) return true;
+        if(std::abs(c)>0.12){
+            int sign=c>0?1:-1;
+            if(turn_sign && sign!=turn_sign) return true;
+            turn_sign=sign;
+        }
+    }
+    for(size_t i=0;i+2<V.size();++i){
+        for(size_t j=i+2;j+1<V.size();++j){
+            Vec2 a=V[i],b=V[i+1],c=V[j],d=V[j+1];
+            double den=cross(b-a,d-c);
+            if(std::abs(den)<1e-10) continue;
+            double t=cross(c-a,d-c)/den,u=cross(c-a,b-a)/den;
+            if(t>1e-5&&t<1-1e-5&&u>1e-5&&u<1-1e-5) return true;
+        }
+    }
+    return false;
 }
 
 Vec2 terminal_vertex(const Segment& seg,const Ray* ray,Vec2 fallback,Vec2 origin,double max_range,double max_ext,double fit_err){
@@ -388,9 +440,23 @@ extern "C" int vertex_selector_process(
     int next_group_id=0, failed=0;
     for(auto &cand:cands){ if((int)groups.size()>=max_obs)break; Group g;g.obs_idx=(int)groups.size();g.nearest=cand.nearest;g.ray_indices=cand.idx;g.hit_points.reserve(cand.idx.size());for(int ri:cand.idx)g.hit_points.push_back(rays[ri].endpoint);
         fit_segments(g.hit_points,std::max(2,line_fit_min_points),line_fit_max_error,line_fit_min_length,ego,g.segments); if(g.segments.empty()){++failed;continue;}
-        const Ray* sr=&rays[cand.idx.front()]; const Ray* er=&rays[cand.idx.back()]; g.vertices=build_vertices(g.segments,sr,er,ego,sensing_range,line_intersection_max_extension,line_fit_max_error); g.terminal_edges=terminal_edges(g.vertices,sr,er,ego,sensing_range);
+        const Ray* sr=&rays[cand.idx.front()]; const Ray* er=&rays[cand.idx.back()]; g.vertices=build_vertices(g.segments,sr,er,ego,sensing_range,line_intersection_max_extension,line_fit_max_error);
+        if(fit_geometry_collapsed(g.segments,g.vertices,line_intersection_max_extension)){
+            bool ok=false; Segment fallback=fit_tls(g.hit_points,ok,ego);
+            if(!ok || norm(fallback.end-fallback.start)<line_fit_min_length){++failed;continue;}
+            g.segments.assign(1,fallback);
+            g.vertices=build_vertices(g.segments,sr,er,ego,sensing_range,line_intersection_max_extension,line_fit_max_error);
+        } g.terminal_edges=terminal_edges(g.vertices,sr,er,ego,sensing_range);
         std::vector<Vec2> poly; const TerminalEdge *se=nullptr,*ee=nullptr; for(auto& te:g.terminal_edges){if(te.side<0)se=&te;else ee=&te;} if(se)poly.push_back(se->end);for(auto v:g.vertices)poly.push_back(v);if(ee)poly.push_back(ee->end);if(poly.size()<3)poly=g.hit_points;poly=dedupe(poly,1e-6);if(poly.size()<3){++failed;continue;}
-        if(polygon_area(poly)<0)std::reverse(poly.begin(),poly.end()); std::vector<std::vector<Vec2>> parts; if(field_flag==0)parts={poly}; else if(!ear_clip(poly,parts)){++failed;continue;}
+        if(polygon_area(poly)<0)std::reverse(poly.begin(),poly.end()); std::vector<std::vector<Vec2>> parts; if(field_flag==0)parts={poly}; else {
+            // Safety envelope: include *all* measured hit points, rather than
+            // trusting TLS lines that may pass behind the actual surface.
+            std::vector<Vec2> envelope=poly;
+            envelope.insert(envelope.end(),g.hit_points.begin(),g.hit_points.end());
+            std::vector<Vec2> hull=convex_hull_points(envelope);
+            if(hull.size()<3){++failed;continue;}
+            parts={cap_convex_outer(hull,9)};
+        }
         int dyn=0;std::vector<double> vxs,vys;for(int ri:cand.idx){if(rays[ri].hit_type==1){++dyn;vxs.push_back(rays[ri].hit_vel.x);vys.push_back(rays[ri].hit_vel.y);}}g.obs_type=(dyn*2>=(int)cand.idx.size() && dyn>0)?1:0;g.velocity=g.obs_type?Vec2{median(vxs),median(vys)}:Vec2{};
         int part_idx=0;for(auto part:parts){part=dedupe(part,1e-10);if(part.size()<3){++part_idx;continue;}if(polygon_area(part)<0)std::reverse(part.begin(),part.end());int gid=next_group_id++;for(size_t li=0;li<part.size();++li)selected.push_back({norm(part[li]-ego),part[li],g.obs_type,g.obs_idx,gid,(int)li,part_idx});++part_idx;}
         groups.push_back(std::move(g));
@@ -408,6 +474,87 @@ extern "C" int vertex_selector_process(
     return 0;
 }
 
+
+// Raw XY points -> spatial clusters -> piecewise-line convex hulls ->
+// 0.5-degree polygon raycast (nearest intersection gives occlusion).
+extern "C" int vertex_selector_process_points(
+    const double* xy, int n_points, double ego_x, double ego_y, double ego_yaw,
+    double sensing_range, double ray_step_deg, double cluster_gap,
+    double fit_error, int min_fit_points, double fit_min_len, double fit_ext,
+    int max_obs, int field_flag,
+    double* out_segments,int cap_segments,double* out_vertices,int cap_vertices,
+    double* out_terminal,int cap_terminal,double* out_hits,int cap_hits,
+    double* out_selected,int cap_selected,double* out_meta,int cap_meta,
+    int* out_counts,int counts_len){
+    if(!out_counts||counts_len<10||n_points<0)return -1;
+    std::fill(out_counts,out_counts+counts_len,0);
+    if(n_points==0||!xy)return 0;
+    const double gap=std::max(0.02,cluster_gap);
+    const double gap2=gap*gap;
+    const double inv=1.0/gap;
+    struct Cell{int x,y;bool operator==(const Cell&b)const{return x==b.x&&y==b.y;}};
+    struct Hash{size_t operator()(Cell a)const{return (uint64_t)(uint32_t)a.x*0x9e3779b185ebca87ULL ^ (uint32_t)a.y;}};
+    std::vector<Vec2> pts;pts.reserve(n_points);
+    std::unordered_map<Cell,std::vector<int>,Hash> bins;
+    Vec2 ego{ego_x,ego_y};
+    for(int i=0;i<n_points;++i){
+        Vec2 p{xy[2*i],xy[2*i+1]};
+        if(!std::isfinite(p.x)||!std::isfinite(p.y)||norm2(p-ego)>sensing_range*sensing_range)continue;
+        int idx=(int)pts.size();pts.push_back(p);
+        bins[{(int)std::floor(p.x*inv),(int)std::floor(p.y*inv)}].push_back(idx);
+    }
+    std::vector<char> seen(pts.size(),0);
+    struct C{double dist;std::vector<Vec2> points;};
+    std::vector<C> clusters;
+    for(int i=0;i<(int)pts.size();++i){
+        if(seen[i])continue;
+        std::queue<int> q;q.push(i);seen[i]=1;
+        C c; c.dist=1e30;
+        while(!q.empty()){
+            int a=q.front();q.pop();Vec2 p=pts[a];c.points.push_back(p);
+            c.dist=std::min(c.dist,norm(p-ego));
+            int cx=(int)std::floor(p.x*inv),cy=(int)std::floor(p.y*inv);
+            for(int dx=-1;dx<=1;++dx)for(int dy=-1;dy<=1;++dy){
+                auto it=bins.find({cx+dx,cy+dy});if(it==bins.end())continue;
+                for(int j:it->second)if(!seen[j]&&norm2(p-pts[j])<=gap2){seen[j]=1;q.push(j);}
+            }
+        }
+        if(c.points.size()>=(size_t)std::max(3,min_fit_points))clusters.push_back(std::move(c));
+    }
+    std::sort(clusters.begin(),clusters.end(),[](const C&a,const C&b){return a.dist<b.dist;});
+    std::vector<double> px,py;std::vector<int> counts,types;
+    const int stride=9;
+    for(const auto& c:clusters){
+        if((int)counts.size()>=max_obs)break;
+        // Order boundary points angularly before fitting; TLS segments preserve
+        // visible corners. The hull is the conservative closure of those faces.
+        Vec2 center{};for(auto p:c.points)center=center+p;center=center/(double)c.points.size();
+        std::vector<Vec2> ordered=c.points;
+        std::sort(ordered.begin(),ordered.end(),[&](Vec2 a,Vec2 b){return std::atan2(a.y-ego.y,a.x-ego.x)<std::atan2(b.y-ego.y,b.x-ego.x);});
+        std::vector<Segment> lines;
+        fit_segments(ordered,std::max(2,min_fit_points),fit_error,fit_min_len,ego,lines);
+        std::vector<Vec2> geom=c.points;
+        if(!lines.empty()){
+            auto V=build_vertices(lines,nullptr,nullptr,ego,sensing_range,fit_ext,fit_error);
+            geom.insert(geom.end(),V.begin(),V.end());
+        }
+        std::vector<Vec2> hull=convex_hull_points(geom);
+        if(hull.size()<3)continue;
+        hull=cap_convex_outer(hull,9);
+        if(hull.size()>9)continue;
+        counts.push_back((int)hull.size());types.push_back(0);
+        for(int k=0;k<stride;++k){Vec2 v=k<(int)hull.size()?hull[k]:hull.back();px.push_back(v.x);py.push_back(v.y);}
+    }
+    if(counts.empty())return 0;
+    std::vector<double> zeros(counts.size(),0.0);
+    double unused_ray[10]={0};
+    return vertex_selector_process(px.data(),py.data(),(int)px.size(),counts.data(),types.data(),
+        zeros.data(),zeros.data(),(int)counts.size(),stride,ego_x,ego_y,ego_yaw,
+        sensing_range,180.0,ray_step_deg,cluster_gap,fit_error,min_fit_points,
+        fit_min_len,fit_ext,max_obs,std::max(1,field_flag),0,unused_ray,0,
+        out_segments,cap_segments,out_vertices,cap_vertices,out_terminal,cap_terminal,
+        out_hits,cap_hits,out_selected,cap_selected,out_meta,cap_meta,out_counts,counts_len);
+}
 
 extern "C" int vertex_selector_process_rays(
     const double* in_rays, int n_rays,
@@ -502,6 +649,12 @@ extern "C" int vertex_selector_process_rays(
         const Ray* sr=&rays[(size_t)cand.idx.front()];
         const Ray* er=&rays[(size_t)cand.idx.back()];
         g.vertices=build_vertices(g.segments,sr,er,ego,sensing_range,line_intersection_max_extension,line_fit_max_error);
+        if(fit_geometry_collapsed(g.segments,g.vertices,line_intersection_max_extension)){
+            bool ok=false; Segment fallback=fit_tls(g.hit_points,ok,ego);
+            if(!ok || norm(fallback.end-fallback.start)<line_fit_min_length){++failed;continue;}
+            g.segments.assign(1,fallback);
+            g.vertices=build_vertices(g.segments,sr,er,ego,sensing_range,line_intersection_max_extension,line_fit_max_error);
+        }
         g.terminal_edges=terminal_edges(g.vertices,sr,er,ego,sensing_range);
         std::vector<Vec2> poly;
         const TerminalEdge *se=nullptr,*ee=nullptr;
@@ -515,7 +668,15 @@ extern "C" int vertex_selector_process_rays(
         if(polygon_area(poly)<0) std::reverse(poly.begin(),poly.end());
         std::vector<std::vector<Vec2>> parts;
         if(field_flag==0) parts={poly};
-        else if(!ear_clip(poly,parts)){++failed;continue;}
+        else {
+            // Safety envelope: include *all* measured hit points, rather than
+            // trusting TLS lines that may pass behind the actual surface.
+            std::vector<Vec2> envelope=poly;
+            envelope.insert(envelope.end(),g.hit_points.begin(),g.hit_points.end());
+            std::vector<Vec2> hull=convex_hull_points(envelope);
+            if(hull.size()<3){++failed;continue;}
+            parts={cap_convex_outer(hull,9)};
+        }
         int dyn=0; std::vector<double> vxs,vys;
         for(int ri:cand.idx){
             const auto& rr=rays[(size_t)ri];

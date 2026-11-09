@@ -4409,6 +4409,226 @@ py::tuple rk4_lin_seq(
     return py::make_tuple(Xn,Ao,Bo,Fo);
 }
 
+
+// -----------------------------------------------------------------------------
+// Five-state kinematics with a first-order yaw-rate actuator lag.
+//
+//   x = [px, py, v, yaw, w],  u = [w_cmd, a]
+//   px' = v cos(yaw), py' = v sin(yaw), v' = a, yaw' = w,
+//   w'  = (w_cmd - w) / tau_w.
+// -----------------------------------------------------------------------------
+
+constexpr int NXL = 5;
+using VecL = std::array<double, NXL>;
+using MatLxx = std::array<double, NXL * NXL>;
+using MatLxu = std::array<double, NXL * 2>;
+
+inline double safe_yawrate_tau(double tau) {
+    if (!std::isfinite(tau) || tau < 1.0e-3) return 1.0e-3;
+    return tau;
+}
+
+struct DynEvalLag {
+    VecL f{};
+    MatLxx A{};
+    MatLxu B{};
+};
+
+DynEvalLag dyn_eval_lag(const VecL& x, const std::array<double, 2>& u, double tau) {
+    DynEvalLag o;
+    const double v = x[2], yaw = x[3], w = x[4];
+    const double c = std::cos(yaw), s = std::sin(yaw);
+    const double inv_tau = 1.0 / tau;
+    o.f = {v * c, v * s, u[1], w, (u[0] - w) * inv_tau};
+    o.A.fill(0.0);
+    o.A[0 * NXL + 2] = c;
+    o.A[0 * NXL + 3] = -v * s;
+    o.A[1 * NXL + 2] = s;
+    o.A[1 * NXL + 3] = v * c;
+    o.A[3 * NXL + 4] = 1.0;
+    o.A[4 * NXL + 4] = -inv_tau;
+    o.B.fill(0.0);
+    o.B[2 * 2 + 1] = 1.0;
+    o.B[4 * 2 + 0] = inv_tau;
+    return o;
+}
+
+inline VecL dyn_f_lag_clamped(
+    const VecL& x, const std::array<double, 2>& u, double tau, double v_min, double v_max)
+{
+    const double v = clampd(x[2], v_min, v_max);
+    const double yaw = x[3], w = x[4];
+    return {v * std::cos(yaw), v * std::sin(yaw), u[1], w, (u[0] - w) / tau};
+}
+
+inline MatLxx mmL_xx(const MatLxx& A, const MatLxx& B) {
+    MatLxx C{}; C.fill(0.0);
+    for (int i = 0; i < NXL; ++i) for (int k = 0; k < NXL; ++k) {
+        const double a = A[i * NXL + k];
+        if (a == 0.0) continue;
+        for (int j = 0; j < NXL; ++j) C[i * NXL + j] += a * B[k * NXL + j];
+    }
+    return C;
+}
+
+inline MatLxu mmL_xu(const MatLxx& A, const MatLxu& B) {
+    MatLxu C{}; C.fill(0.0);
+    for (int i = 0; i < NXL; ++i) for (int k = 0; k < NXL; ++k) {
+        const double a = A[i * NXL + k];
+        if (a == 0.0) continue;
+        for (int j = 0; j < 2; ++j) C[i * 2 + j] += a * B[k * 2 + j];
+    }
+    return C;
+}
+
+inline VecL mvL(const MatLxx& A, const VecL& b) {
+    VecL c{}; c.fill(0.0);
+    for (int i = 0; i < NXL; ++i) for (int k = 0; k < NXL; ++k) c[i] += A[i * NXL + k] * b[k];
+    return c;
+}
+
+py::array_t<double> rollout_ego_lag_seq(
+    const py::array_t<double, py::array::forcecast>& x0arr,
+    const py::array_t<double, py::array::forcecast>& Uarr,
+    const py::array_t<double, py::array::forcecast>& dtarr,
+    double yawrate_min,
+    double yawrate_max,
+    double a_min,
+    double a_max,
+    double v_min,
+    double v_max,
+    double tau_w)
+{
+    const VecViewD x0 = view1d_double(x0arr);
+    const MatView2D U = view2d(Uarr);
+    const VecViewD dt = view1d_double(dtarr);
+    if (x0.n < NXL) throw std::runtime_error("rollout_ego_lag_seq expects x0=[px,py,v,yaw,yawrate]");
+    if (U.c < 2) throw std::runtime_error("rollout_ego_lag_seq expects U=Nx2");
+    const double tau = safe_yawrate_tau(tau_w);
+
+    const ssize_t N = U.r;
+    py::array_t<double> out({N + 1, static_cast<ssize_t>(NXL)});
+    auto oi = out.mutable_unchecked<2>();
+
+    VecL x = {x0(0), x0(1), x0(2), wrap_to_pi(x0(3)), x0(4)};
+    for (int j = 0; j < NXL; ++j) oi(0, j) = x[j];
+
+    {
+        py::gil_scoped_release release;
+        for (ssize_t k = 0; k < N; ++k) {
+            std::array<double, 2> u = {
+                clampd(U(k, 0), yawrate_min, yawrate_max),
+                clampd(U(k, 1), a_min, a_max)
+            };
+            double h = dt.n > 0 ? dt(std::min<ssize_t>(k, dt.n - 1)) : 0.05;
+            if (!std::isfinite(h)) h = 0.05;
+
+            const auto k1 = dyn_f_lag_clamped(x, u, tau, v_min, v_max);
+            const auto k2 = dyn_f_lag_clamped(add_scaled(x, k1, 0.5 * h), u, tau, v_min, v_max);
+            const auto k3 = dyn_f_lag_clamped(add_scaled(x, k2, 0.5 * h), u, tau, v_min, v_max);
+            const auto k4 = dyn_f_lag_clamped(add_scaled(x, k3, h), u, tau, v_min, v_max);
+            for (int j = 0; j < NXL; ++j) {
+                x[j] += (h / 6.0) * (k1[j] + 2.0 * k2[j] + 2.0 * k3[j] + k4[j]);
+            }
+            x[2] = clampd(x[2], v_min, v_max);
+            x[3] = wrap_to_pi(x[3]);
+            for (int j = 0; j < NXL; ++j) oi(k + 1, j) = x[j];
+        }
+    }
+    return out;
+}
+
+py::tuple rk4_lag_lin_seq(
+    const py::array_t<double, py::array::forcecast>& Xarr,
+    const py::array_t<double, py::array::forcecast>& Uarr,
+    const py::array_t<double, py::array::forcecast>& dtarr,
+    double v_min,
+    double v_max,
+    double tau_w)
+{
+    const MatView2D X = view2d(Xarr);
+    const MatView2D U = view2d(Uarr);
+    const VecViewD dt = view1d_double(dtarr);
+    if (X.c < NXL || U.c < 2 || U.r != X.r) throw std::runtime_error("rk4_lag_lin_seq expects X=Hx5, U=Hx2");
+    const double tau = safe_yawrate_tau(tau_w);
+    const ssize_t H = X.r;
+    py::array_t<double> Xn({H, static_cast<ssize_t>(NXL)});
+    py::array_t<double> Ao({H, static_cast<ssize_t>(NXL), static_cast<ssize_t>(NXL)});
+    py::array_t<double> Bo({H, static_cast<ssize_t>(NXL), static_cast<ssize_t>(2)});
+    py::array_t<double> Fo({H, static_cast<ssize_t>(NXL)});
+    auto xn = Xn.mutable_unchecked<2>();
+    auto ao = Ao.mutable_unchecked<3>();
+    auto bo = Bo.mutable_unchecked<3>();
+    auto fo = Fo.mutable_unchecked<2>();
+
+    {
+    py::gil_scoped_release release;
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if(H >= RK4_OMP_HORIZON_THRESHOLD)
+#endif
+    for (ssize_t h = 0; h < H; ++h) {
+        VecL x = {X(h,0), X(h,1), X(h,2), X(h,3), X(h,4)};
+        std::array<double, 2> u = {U(h,0), U(h,1)};
+        const double d = dt.n > 0 ? dt(std::min<ssize_t>(h, dt.n - 1)) : 0.05;
+        MatLxx I{}; I.fill(0.0);
+        for (int i = 0; i < NXL; ++i) I[i * NXL + i] = 1.0;
+        VecL z{}; z.fill(0.0);
+
+        // Stage 1
+        const auto e1 = dyn_eval_lag(x, u, tau);
+        const MatLxx K1x = e1.A; const MatLxu K1u = e1.B; const VecL K1dt = z;
+        // Stage 2
+        const auto x2 = add_scaled(x, e1.f, 0.5 * d);
+        MatLxx S2x = I; for (int i = 0; i < NXL * NXL; ++i) S2x[i] += 0.5 * d * K1x[i];
+        MatLxu S2u = K1u; for (double& q : S2u) q *= 0.5 * d;
+        VecL S2dt{}; for (int i = 0; i < NXL; ++i) S2dt[i] = 0.5 * e1.f[i] + 0.5 * d * K1dt[i];
+        const auto e2 = dyn_eval_lag(x2, u, tau);
+        const MatLxx K2x = mmL_xx(e2.A, S2x);
+        MatLxu K2u = mmL_xu(e2.A, S2u); for (int i = 0; i < NXL * 2; ++i) K2u[i] += e2.B[i];
+        const VecL K2dt = mvL(e2.A, S2dt);
+        // Stage 3
+        const auto x3 = add_scaled(x, e2.f, 0.5 * d);
+        MatLxx S3x = I; for (int i = 0; i < NXL * NXL; ++i) S3x[i] += 0.5 * d * K2x[i];
+        MatLxu S3u = K2u; for (double& q : S3u) q *= 0.5 * d;
+        VecL S3dt{}; for (int i = 0; i < NXL; ++i) S3dt[i] = 0.5 * e2.f[i] + 0.5 * d * K2dt[i];
+        const auto e3 = dyn_eval_lag(x3, u, tau);
+        const MatLxx K3x = mmL_xx(e3.A, S3x);
+        MatLxu K3u = mmL_xu(e3.A, S3u); for (int i = 0; i < NXL * 2; ++i) K3u[i] += e3.B[i];
+        const VecL K3dt = mvL(e3.A, S3dt);
+        // Stage 4
+        const auto x4 = add_scaled(x, e3.f, d);
+        MatLxx S4x = I; for (int i = 0; i < NXL * NXL; ++i) S4x[i] += d * K3x[i];
+        MatLxu S4u = K3u; for (double& q : S4u) q *= d;
+        VecL S4dt{}; for (int i = 0; i < NXL; ++i) S4dt[i] = e3.f[i] + d * K3dt[i];
+        const auto e4 = dyn_eval_lag(x4, u, tau);
+        const MatLxx K4x = mmL_xx(e4.A, S4x);
+        MatLxu K4u = mmL_xu(e4.A, S4u); for (int i = 0; i < NXL * 2; ++i) K4u[i] += e4.B[i];
+        const VecL K4dt = mvL(e4.A, S4dt);
+
+        VecL rsum{};
+        for (int i = 0; i < NXL; ++i) rsum[i] = e1.f[i] + 2.0 * e2.f[i] + 2.0 * e3.f[i] + e4.f[i];
+        VecL xnext{};
+        for (int i = 0; i < NXL; ++i) xnext[i] = x[i] + d * rsum[i] / 6.0;
+        xnext[2] = clampd(xnext[2], v_min, v_max);
+        xnext[3] = wrap_to_pi(xnext[3]);
+
+        for (int i = 0; i < NXL; ++i) xn(h, i) = xnext[i];
+        for (int i = 0; i < NXL; ++i) for (int j = 0; j < NXL; ++j) {
+            const int q = i * NXL + j;
+            ao(h, i, j) = I[q] + d * (K1x[q] + 2.0 * K2x[q] + 2.0 * K3x[q] + K4x[q]) / 6.0;
+        }
+        for (int i = 0; i < NXL; ++i) for (int j = 0; j < 2; ++j) {
+            const int q = i * 2 + j;
+            bo(h, i, j) = d * (K1u[q] + 2.0 * K2u[q] + 2.0 * K3u[q] + K4u[q]) / 6.0;
+        }
+        for (int i = 0; i < NXL; ++i) {
+            fo(h, i) = rsum[i] / 6.0 + d * (K1dt[i] + 2.0 * K2dt[i] + 2.0 * K3dt[i] + K4dt[i]) / 6.0;
+        }
+    }
+    }
+    return py::make_tuple(Xn, Ao, Bo, Fo);
+}
+
 }  // namespace
 
 PYBIND11_MODULE(collision_lin_cpp, m) {
@@ -4613,4 +4833,13 @@ PYBIND11_MODULE(collision_lin_cpp, m) {
           py::arg("a_min"), py::arg("a_max"), py::arg("v_min"), py::arg("v_max"));
     m.def("build_dynamics_lin_seq", &rk4_lin_seq, py::arg("X"), py::arg("U"), py::arg("dt"), py::arg("v_min"), py::arg("v_max"));
     m.def("rk4_lin_seq", &rk4_lin_seq, py::arg("X"), py::arg("U"), py::arg("dt"), py::arg("v_min"), py::arg("v_max"));  // legacy alias
+    m.attr("YAWRATE_LAG_API") = 1;
+    m.def("rollout_ego_lag_seq", &rollout_ego_lag_seq,
+          py::arg("x0"), py::arg("U"), py::arg("dt"),
+          py::arg("yawrate_min"), py::arg("yawrate_max"),
+          py::arg("a_min"), py::arg("a_max"), py::arg("v_min"), py::arg("v_max"),
+          py::arg("tau_w"));
+    m.def("build_dynamics_lag_lin_seq", &rk4_lag_lin_seq,
+          py::arg("X"), py::arg("U"), py::arg("dt"), py::arg("v_min"), py::arg("v_max"),
+          py::arg("tau_w"));
 }
