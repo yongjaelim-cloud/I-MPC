@@ -583,6 +583,10 @@ class _CppVertexPipeline(object):
         if self.motion_set_noise_fn is not None:
             self.motion_set_noise_fn.argtypes = [ctypes.c_double, ctypes.c_double, ctypes.c_double]
             self.motion_set_noise_fn.restype = None
+        self.motion_set_moving_confirm_fn = getattr(self.lib, "vertex_selector_motion_set_moving_confirm", None)
+        if self.motion_set_moving_confirm_fn is not None:
+            self.motion_set_moving_confirm_fn.argtypes = [ctypes.c_double]
+            self.motion_set_moving_confirm_fn.restype = None
         self._capacities = None
         self.last_kernel_ms = 0.0
         self.last_motion_ms = 0.0
@@ -1472,11 +1476,15 @@ class VertexSelectorNode(object):
         # the C++ defaults (0.03 m, 2.0 m/s^2) underestimate the frame-to-frame
         # line-fit / ego-pose noise and barely filter (Kalman gain ~0.9).
         self.motion_meas_sigma = float(rospy.get_param(
-            "~motion_meas_sigma", self.selector_cfg.get("motion_meas_sigma", 0.05)))
+            "~motion_meas_sigma", self.selector_cfg.get("motion_meas_sigma", 0.10)))
         self.motion_accel_sigma = float(rospy.get_param(
             "~motion_accel_sigma", self.selector_cfg.get("motion_accel_sigma", 0.5)))
         self.motion_init_vel_sigma = float(rospy.get_param(
             "~motion_init_vel_sigma", self.selector_cfg.get("motion_init_vel_sigma", 1.0)))
+        # Seconds the speed must stay above vertex_dynamic_speed_threshold before
+        # an obstacle is flagged moving (rate independent; 0.2 s = old 3 frames @10 Hz).
+        self.motion_moving_confirm_sec = float(rospy.get_param(
+            "~motion_moving_confirm_sec", self.selector_cfg.get("motion_moving_confirm_sec", 0.3)))
         # Previous raycast-reconstructed obstacle groups used for temporal
         # association.  Each entry stores the fitted visible vertices and the
         # obstacle-level velocity estimated from those vertices.
@@ -1587,13 +1595,16 @@ class VertexSelectorNode(object):
             max_range=float(rospy.get_param("~scan_match_max_range", 10.0)),
         )
         # Ego-motion compensation source for the LiDAR motion frame.
+        # Default "tf" (2026-11-12, 20 Hz bag): /tracked_pose shifted the whole
+        # static scene by 3.9 cm (p90 14 cm) per 50 ms scan -> static obstacles
+        # at 0.7 m/s; the odom TF chain gives 1.1 cm (p90 2.9 cm).
         #   "tracked_pose": sensor pose from /tracked_pose (interpolated at the
         #       scan / per-point time), extrapolated and jump-gated with
         #       /cmd_vel.  Fitting/tracking run in a continuous "ego_local"
         #       frame, so ego motion does not appear as obstacle velocity.
         #   "tf": previous behaviour (TF ~cloud_motion_frame, default odom).
         self.ego_motion_source = str(rospy.get_param(
-            "~ego_motion_source", self.selector_cfg.get("ego_motion_source", "tracked_pose")
+            "~ego_motion_source", self.selector_cfg.get("ego_motion_source", "tf")
         )).strip().lower()
         if self.ego_motion_source not in ("tracked_pose", "tf"):
             raise ValueError("~ego_motion_source must be tracked_pose or tf")
@@ -1717,6 +1728,8 @@ class VertexSelectorNode(object):
                         pipeline.motion_set_noise_fn(
                             float(self.motion_meas_sigma), float(self.motion_accel_sigma),
                             float(self.motion_init_vel_sigma))
+                    if pipeline.motion_set_moving_confirm_fn is not None:
+                        pipeline.motion_set_moving_confirm_fn(float(self.motion_moving_confirm_sec))
                     self.cpp_vertex_pipeline = pipeline
                     self.cpp_vertex_library = candidate
                     rospy.loginfo(

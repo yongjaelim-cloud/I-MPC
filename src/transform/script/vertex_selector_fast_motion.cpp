@@ -787,7 +787,8 @@ struct MotionTrack {
     double last_stamp{0.0};
     int updates{0};                 // frames with an accepted measurement
     int rejects{0};                 // consecutive gated-out frames
-    std::deque<bool> moving_history;
+    double moving_since{-1.0};      // stamp the speed first exceeded the threshold (-1: below)
+    bool moving_state{false};
     std::vector<Vec2> vertices;
     std::vector<Segment> segments;
     std::vector<Vec2> hits;         // raw hit points of the last observation
@@ -804,6 +805,10 @@ TrackerState g_tracker;
 double g_meas_sigma = 0.03;    // [m] LiDAR range / line-fit noise (1 sigma)
 double g_accel_sigma = 2.0;    // [m/s^2] velocity random walk
 double g_init_vel_sigma = 1.0; // [m/s] prior of a new track
+// Time the speed must stay above the threshold before the moving flag turns
+// on.  Time-based (not frame-count) so it does not depend on the LiDAR rate;
+// 0.2 s equals the former 3 consecutive frames at 10 Hz.
+double g_moving_confirm_sec = 0.2;
 constexpr int kEffectivePoints = 15; // cap: hit-point noise is not independent of line-fit noise
 constexpr double kOcclusionMaxGap = 1.5; // [m] largest shadow an obstacle may re-emerge across
 
@@ -946,6 +951,11 @@ extern "C" void vertex_selector_motion_set_noise(double meas_sigma, double accel
     if(meas_sigma>0.0 && std::isfinite(meas_sigma)) g_meas_sigma=meas_sigma;
     if(accel_sigma>0.0 && std::isfinite(accel_sigma)) g_accel_sigma=accel_sigma;
     if(init_vel_sigma>0.0 && std::isfinite(init_vel_sigma)) g_init_vel_sigma=init_vel_sigma;
+}
+
+// Optional tuning hook. Values < 0 leave the current setting unchanged.
+extern "C" void vertex_selector_motion_set_moving_confirm(double confirm_sec){
+    if(confirm_sec>=0.0 && std::isfinite(confirm_sec)) g_moving_confirm_sec=confirm_sec;
 }
 
 extern "C" int vertex_selector_motion_update(
@@ -1130,7 +1140,7 @@ extern "C" int vertex_selector_motion_update(
             const MotionTrack&T=prev[(size_t)pi];
             prev_used[(size_t)pi]=1;
             cg.velocity=T.velocity; cg.P=T.P; cg.updates=T.updates; cg.rejects=T.rejects;
-            cg.moving_history=T.moving_history;
+            cg.moving_since=T.moving_since; cg.moving_state=T.moving_state;
             cg.last_stamp=T.last_stamp;
             const double dt=observation_stamp-T.last_stamp;
             dt_rec=std::isfinite(dt)?dt:0.0;
@@ -1238,17 +1248,19 @@ extern "C" int vertex_selector_motion_update(
         if(speed>velocity_max){ cg.velocity=cg.velocity*(velocity_max/speed); speed=velocity_max; }
         const bool velocity_valid=enable_velocity && cg.updates>=2;
 
-        // Moving flag: 3 consecutive frames above the threshold to switch on;
-        // once moving, stays on until the speed falls below 60% of it.
+        // Moving flag: speed must stay above the threshold for
+        // g_moving_confirm_sec to switch on; once moving, stays on until the
+        // speed falls below 60% of it.
         if(!same_observation){
-            bool was_moving=cg.moving_history.size()==3 &&
-                std::all_of(cg.moving_history.begin(),cg.moving_history.end(),[](bool x){return x;});
-            double thr=was_moving?0.6*dynamic_speed_threshold:dynamic_speed_threshold;
-            cg.moving_history.push_back(velocity_valid && speed>=thr);
-            if(cg.moving_history.size()>3) cg.moving_history.pop_front();
+            double thr=cg.moving_state?0.6*dynamic_speed_threshold:dynamic_speed_threshold;
+            if(velocity_valid && speed>=thr){
+                if(cg.moving_since<0.0) cg.moving_since=observation_stamp;
+                if(observation_stamp-cg.moving_since>=g_moving_confirm_sec-1e-6) cg.moving_state=true;
+            } else {
+                cg.moving_since=-1.0; cg.moving_state=false;
+            }
         }
-        bool moving=cg.moving_history.size()==3 &&
-            std::all_of(cg.moving_history.begin(),cg.moving_history.end(),[](bool x){return x;});
+        bool moving=cg.moving_state;
 
         if(out_motion_meta){
             double*m=out_motion_meta+7*ci;
