@@ -156,8 +156,8 @@
       "ego_y": -5.0,
       "ego_v": 0.0,
       "ego_yaw": 0.785,
-      "ego_L": 0.6,
-      "ego_W": 0.6,
+      "ego_L": 0.5,
+      "ego_W": 0.5,
       "hz": 20.0,
       "frame_id": "map",
       "reset_from_goal_once": true,
@@ -265,7 +265,7 @@
       "selected_vertex_set_timeout_s": 0.5,
       "initial_guidance_topic": "/initial_guidance1",
       "initial_traj_topic": "/initial_traj1",
-      "d_safe": 0.2,
+      "d_safe": 0.3,
       "rho_Phi_global": 0.0,
       "q_global_goal": 1.0,
       "normal_orientation": "inward",
@@ -287,7 +287,7 @@
       "M_max": 20,
       "F_max": 200,
       "lambda_r": 0.001,
-      "reg_margin": -0.151,
+      "reg_margin": -0.201,
       "comment": "cos(theta+alpha)+reg_margin"
     },
     "ros": {
